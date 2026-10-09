@@ -24,6 +24,6 @@ pub enum Kind {
     /// position-independent: peers may apply it in any order, once.
     TextEdit { para: String, update: Vec<u8> },
     /// Where the author's cursor is now: an app-encoded position, opaque to
-    /// the mechanism.
-    CursorMoved { position: Option<String> },
+    /// the mechanism, plus the display name to show next to it.
+    CursorMoved { position: Option<String>, name: Option<String> },
 }

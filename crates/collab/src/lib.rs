@@ -9,12 +9,14 @@
 //! once per app; wordcraft is first.
 
 pub mod host;
+pub mod mem;
 pub mod message;
 pub mod presence;
 pub mod text;
 pub mod transport;
 
 pub use host::{CollabHost, DocAdapter, Origin};
+pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
 pub use presence::{Peer, Presence, color_for};
 pub use text::TextMerge;
