@@ -188,6 +188,9 @@ pub trait GrantIssuer: Send + Sync {
     /// An open invitation token: signed, no holder, so a joiner can present
     /// it and the host turns it into the concrete grant.
     fn open_token(&self, doc: &str, role: Role, ttl_ms: u64, now_ms: u64) -> Result<SignedGrant, String>;
+    /// Signs raw envelope bytes as the host (the invite envelope and
+    /// whatever else the seam signs later).
+    fn sign(&self, bytes: &[u8]) -> Result<Vec<u8>, String>;
 }
 
 /// Who may act on this document, as every replica checks it: the host, plus

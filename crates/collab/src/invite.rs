@@ -8,8 +8,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::grant::SignedGrant;
 
-/// The layout version.
-pub const INVITE_VERSION: u32 = 1;
+/// The layout version. 2 added the host's signature over the envelope:
+/// version 1 invites (unsigned) are refused outright.
+pub const INVITE_VERSION: u32 = 2;
+
+/// The signature context for invites.
+pub const INVITE_CONTEXT: &[u8] = b"craft-collab/invite/v1";
 
 fn default_profile() -> String {
     "pq_hybrid".into()
@@ -42,9 +46,54 @@ pub struct Invite {
     pub expires_ms: u64,
     /// The host-signed open token the joiner presents.
     pub token: SignedGrant,
+    /// The host's signature over [`Invite::signed_bytes`]: every envelope
+    /// field and the token, so a joiner can verify exactly who invited it
+    /// and that nothing (seed, realm, expiry, token) was swapped on the way.
+    #[serde(default)]
+    pub signature: Vec<u8>,
+}
+
+/// What the invite signature covers: the envelope and the token, in one
+/// canonical JSON body.
+#[derive(Serialize)]
+struct InviteBody<'a> {
+    v: u32,
+    doc: &'a str,
+    host: &'a str,
+    host_key: &'a str,
+    host_name: &'a str,
+    realm: &'a str,
+    realm_key: &'a str,
+    profile: &'a str,
+    seed: &'a str,
+    issued_ms: u64,
+    expires_ms: u64,
+    token: &'a SignedGrant,
 }
 
 impl Invite {
+    /// The bytes the host's signature covers.
+    pub fn signed_bytes(&self) -> Result<Vec<u8>, String> {
+        let body = InviteBody {
+            v: self.v,
+            doc: &self.doc,
+            host: &self.host,
+            host_key: &self.host_key,
+            host_name: &self.host_name,
+            realm: &self.realm,
+            realm_key: &self.realm_key,
+            profile: &self.profile,
+            seed: &self.seed,
+            issued_ms: self.issued_ms,
+            expires_ms: self.expires_ms,
+            token: &self.token,
+        };
+        let mut bytes = Vec::with_capacity(INVITE_CONTEXT.len() + 512);
+        bytes.extend_from_slice(INVITE_CONTEXT);
+        bytes.extend_from_slice(&serde_json::to_vec(&body).map_err(|e| e.to_string())?);
+        Ok(bytes)
+    }
+
     /// The copyable line.
     pub fn encode(&self) -> Result<String, String> {
         serde_json::to_string(self).map_err(|e| e.to_string())
@@ -96,6 +145,7 @@ mod tests {
                 },
                 signature: vec![1, 2, 3],
             },
+            signature: vec![9, 9, 9],
         }
     }
 
@@ -120,5 +170,25 @@ mod tests {
     #[test]
     fn the_token_is_open() {
         assert!(invite().token.grant.is_open());
+    }
+
+    #[test]
+    fn the_signed_bytes_cover_the_envelope_and_the_token() {
+        let base = invite().signed_bytes().expect("bytes");
+        // Any field changing changes the signed bytes: the seed (where the
+        // joiner connects), the expiry, and the token itself.
+        let mut tampered = invite();
+        tampered.seed.push('9');
+        assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the seed is covered");
+        let mut tampered = invite();
+        tampered.expires_ms += 1;
+        assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the expiry is covered");
+        let mut tampered = invite();
+        tampered.token.signature.push(4);
+        assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the token is covered");
+        // The signature itself is not part of what is signed.
+        let mut tampered = invite();
+        tampered.signature = vec![7, 7, 7];
+        assert_eq!(base, tampered.signed_bytes().expect("bytes"));
     }
 }
