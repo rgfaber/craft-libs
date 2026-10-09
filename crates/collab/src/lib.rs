@@ -17,7 +17,7 @@ pub mod presence;
 pub mod text;
 pub mod transport;
 
-pub use grant::{Access, Admission, Grant, Role, SignedGrant};
+pub use grant::{Access, Admission, GRANT_VERSION, Grant, GrantVerifier, Role, SignedGrant};
 pub use host::{CollabHost, DocAdapter, Origin};
 pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
