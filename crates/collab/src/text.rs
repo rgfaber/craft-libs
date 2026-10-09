@@ -7,9 +7,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use yrs::types::Attrs;
 use yrs::undo::{Options as UndoOptions, UndoManager};
 use yrs::updates::decoder::Decode;
-use yrs::{Doc, GetString, Options, Origin, ReadTxn, Text, TextRef, Transact, Update};
+use yrs::{Any, Doc, GetString, Options, Origin, Out, ReadTxn, Text, TextRef, Transact, Update};
 
 /// The text CRDT for one document: paragraph id -> text, plus one undo
 /// manager per paragraph, scoped to this author's origin.
@@ -120,6 +121,51 @@ impl TextMerge {
         txn.apply_update(update).map_err(|e| format!("{e:?}"))
     }
 
+    /// Applies a bold change over `[index, index+len)` as a CRDT attribute:
+    /// the formatting travels with the text items, so it covers exactly the
+    /// characters the author covered, whatever concurrent inserts land.
+    /// Returns the update to broadcast, `None` when nothing changed.
+    pub fn local_bold(&mut self, para: &str, index: u32, len: u32, bold: bool) -> Option<Vec<u8>> {
+        if len == 0 {
+            return None;
+        }
+        self.manager(para).reset();
+        let total = self.text(para).len() as u32;
+        let index = index.min(total);
+        let len = len.min(total - index);
+        if len == 0 {
+            return None;
+        }
+        let value = if bold { Any::Bool(true) } else { Any::Null };
+        let attrs: Attrs = [(std::sync::Arc::<str>::from("bold"), value)].into_iter().collect();
+        let update = {
+            let text = self.text_ref(para);
+            let mut txn = self.doc.transact_mut_with(self.origin.clone());
+            text.format(&mut txn, index, len, attrs);
+            txn.encode_update_v1()
+        };
+        Some(update)
+    }
+
+    /// The bold spans (byte ranges) the CRDT currently holds for `para`, in
+    /// order: the item-anchored truth every replica can derive runs from.
+    pub fn bold_spans(&self, para: &str) -> Vec<(u32, u32)> {
+        let text = self.text_ref(para);
+        let txn = self.doc.transact();
+        let mut spans = Vec::new();
+        let mut pos = 0u32;
+        for chunk in text.diff(&txn, |_| ()) {
+            let Some(s) = out_text(&chunk.insert) else { continue };
+            let bold = chunk.attributes.as_deref().and_then(|a| a.get("bold")).is_some_and(|v| matches!(v, Any::Bool(true)));
+            let n = s.len() as u32;
+            if bold && n > 0 {
+                spans.push((pos, pos + n));
+            }
+            pos += n;
+        }
+        spans
+    }
+
     /// Applies a peer's update; returns the merged text of `para`.
     pub fn apply_update(&mut self, para: &str, update: &[u8]) -> Result<String, String> {
         let update = Update::decode_v1(update).map_err(|e| format!("{e:?}"))?;
@@ -184,6 +230,14 @@ pub(crate) fn splice(before: &str, after: &str) -> (u32, String, String) {
     (pre as u32, before[pre..before.len() - suf].to_string(), after[pre..after.len() - suf].to_string())
 }
 
+/// The text of a diff chunk, when it is text.
+fn out_text(out: &Out) -> Option<String> {
+    match out {
+        Out::Any(Any::String(s)) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +268,28 @@ mod tests {
         assert_eq!(ta2, tb2, "interleaved edits converge");
         assert_eq!(a.text("p1"), ta2);
         assert_eq!(b.text("p1"), ta2);
+    }
+
+    #[test]
+    fn bold_is_anchored_to_the_text_it_covers() {
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
+        // A types, B hears it.
+        let u = a.local_edit_exact("p1", 0, 0, "Bravo. Alpha. ").expect("text");
+        let _ = b.apply_update("p1", &u).expect("B applies");
+
+        // B bolds "Alpha." (bytes 7..13).
+        let ub = b.local_bold("p1", 7, 6, true).expect("bold");
+        // A inserts "ONE " inside that span before hearing about the bold.
+        let ua = a.local_edit_exact("p1", 10, 0, "ONE ").expect("insert");
+        // Adversarial exchange order: B's bold lands at A after its insert,
+        // A's insert lands at B after B's bold.
+        let _ = a.apply_update("p1", &ub).expect("A applies bold");
+        let _ = b.apply_update("p1", &ua).expect("B applies insert");
+
+        assert_eq!(a.text("p1"), b.text("p1"), "text converged");
+        assert_eq!(a.bold_spans("p1"), b.bold_spans("p1"), "the bold covers the same characters on both: item-anchored");
+        assert!(!a.bold_spans("p1").is_empty(), "and it is still there");
     }
 
     #[test]
