@@ -356,6 +356,11 @@ impl Access {
         self.holders.len()
     }
 
+    /// The holder ids, sorted (the UI's People list).
+    pub fn holder_ids(&self) -> Vec<String> {
+        self.holders.keys().cloned().collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.holders.is_empty()
     }

@@ -11,6 +11,10 @@ use crate::grant::SignedGrant;
 /// The layout version.
 pub const INVITE_VERSION: u32 = 1;
 
+fn default_profile() -> String {
+    "pq_hybrid".into()
+}
+
 /// A host's invitation to one document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Invite {
@@ -25,6 +29,13 @@ pub struct Invite {
     pub host_name: String,
     /// The realm id (hex) the document is shared in.
     pub realm: String,
+    /// The realm key (hex), when the transport needs one to be reached.
+    #[serde(default)]
+    pub realm_key: String,
+    /// The signing profile (its name as the adapter knows it), so the joiner
+    /// verifies the host's grants the way the host signs them.
+    #[serde(default = "default_profile")]
+    pub profile: String,
     /// One seed station, `host:port:node_hex`.
     pub seed: String,
     pub issued_ms: u64,
@@ -67,6 +78,8 @@ mod tests {
             host_key: "bb".repeat(32),
             host_name: "Host".into(),
             realm: "cc".repeat(32),
+            realm_key: "ee".repeat(32),
+            profile: "pq_hybrid".into(),
             seed: "station.example:4433:dd".repeat(32),
             issued_ms: 100,
             expires_ms: 200,
