@@ -26,4 +26,11 @@ pub enum Kind {
     /// Where the author's cursor is now: an app-encoded position, opaque to
     /// the mechanism, plus the display name to show next to it.
     CursorMoved { position: Option<String>, name: Option<String> },
+    /// A peer joining asks for the shared document's current state.
+    SnapshotRequest {},
+    /// The document's current state, as the app's [`DocAdapter`] encodes it
+    /// (stable ids included), so a joining peer starts aligned.
+    ///
+    /// [`DocAdapter`]: crate::host::DocAdapter
+    Snapshot { data: Vec<u8> },
 }

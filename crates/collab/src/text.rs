@@ -1,42 +1,46 @@
 //! Paragraph text merge: one CRDT text per stable paragraph id, so
 //! concurrent typing converges; per-author undo reverts only the local
-//! author's own last edit.
+//! author's own edits, tracked per origin by yrs's own undo manager.
 //!
 //! The spike uses `yrs` (Yjs's Rust implementation) with its default
 //! byte-offset text indexing, which matches the apps' byte offsets.
 
-use yrs::updates::decoder::Decode;
-use yrs::{Doc, GetString, Options, Text, TextRef, Transact, Update};
+use std::collections::{HashMap, HashSet};
 
-/// The text CRDT for one document: paragraph id -> text, plus the local
-/// author's undo stack.
+use yrs::undo::{Options as UndoOptions, UndoManager};
+use yrs::updates::decoder::Decode;
+use yrs::{Doc, GetString, Options, Origin, ReadTxn, Text, TextRef, Transact, Update};
+
+/// The text CRDT for one document: paragraph id -> text, plus one undo
+/// manager per paragraph, scoped to this author's origin.
 pub struct TextMerge {
     doc: Doc,
-    undo: Vec<UndoEntry>,
-}
-
-/// One local edit, in the terms later undo needs.
-#[derive(Clone, Debug)]
-struct UndoEntry {
-    para: String,
-    index: u32,
-    removed: String,
-    inserted: String,
-}
-
-impl Default for TextMerge {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// This author's transaction origin: what its undo managers track.
+    origin: Origin,
+    managers: HashMap<String, UndoManager<()>>,
 }
 
 impl TextMerge {
-    pub fn new() -> Self {
-        TextMerge { doc: Doc::with_options(Options::default()), undo: Vec::new() }
+    /// A merge for one author (whose edits it can undo).
+    pub fn new(author: &str) -> Self {
+        TextMerge { doc: Doc::with_options(Options::default()), origin: Origin::from(author.to_string()), managers: HashMap::new() }
     }
 
     fn text_ref(&self, para: &str) -> TextRef {
         self.doc.get_or_insert_text(para.to_string())
+    }
+
+    /// The undo manager scoped to `para`, created before the transaction it
+    /// must observe.
+    fn manager(&mut self, para: &str) -> &mut UndoManager<()> {
+        let doc = self.doc.clone();
+        let origin = self.origin.clone();
+        let name = para.to_string();
+        self.managers.entry(name).or_insert_with(move || {
+            let text = doc.get_or_insert_text(para.to_string());
+            let options = UndoOptions { tracked_origins: HashSet::from([origin]), ..UndoOptions::default() };
+            UndoManager::with_scope_and_options(&doc, &text, options)
+        })
     }
 
     /// The merged text of a paragraph.
@@ -48,24 +52,57 @@ impl TextMerge {
 
     /// Applies the local change `before -> after` to `para` and returns the
     /// CRDT update to broadcast, `None` when nothing changed.
+    ///
+    /// This reconstructs the edit from the text, which is ambiguous when an
+    /// insert's text shares context with what is already there; apps that
+    /// know the exact edit (caret and typed text) should call
+    /// [`TextMerge::local_edit_exact`] instead.
     pub fn local_edit(&mut self, para: &str, before: &str, after: &str) -> Option<Vec<u8>> {
         let (index, removed, inserted) = splice(before, after);
-        if removed.is_empty() && inserted.is_empty() {
+        self.local_edit_exact(para, index, removed.len() as u32, &inserted)
+    }
+
+    /// Applies an exact local edit: `remove_len` bytes at `index`, replaced
+    /// by `insert`. Never panics on a stale position: it clamps into the
+    /// text.
+    pub fn local_edit_exact(&mut self, para: &str, index: u32, remove_len: u32, insert: &str) -> Option<Vec<u8>> {
+        if remove_len == 0 && insert.is_empty() {
+            return None;
+        }
+        // The manager must exist before the transaction, or it misses it;
+        // reset ends the previous capture window, so one command is one
+        // undo step.
+        self.manager(para).reset();
+        let len = self.text(para).len() as u32;
+        let index = index.min(len);
+        let remove_len = remove_len.min(len - index);
+        if remove_len == 0 && insert.is_empty() {
             return None;
         }
         let update = {
             let text = self.text_ref(para);
-            let mut txn = self.doc.transact_mut();
-            if !removed.is_empty() {
-                text.remove_range(&mut txn, index, removed.len() as u32);
+            let mut txn = self.doc.transact_mut_with(self.origin.clone());
+            if remove_len > 0 {
+                text.remove_range(&mut txn, index, remove_len);
             }
-            if !inserted.is_empty() {
-                text.insert(&mut txn, index, &inserted);
+            if !insert.is_empty() {
+                text.insert(&mut txn, index, insert);
             }
             txn.encode_update_v1()
         };
-        self.undo.push(UndoEntry { para: para.to_string(), index, removed, inserted });
         Some(update)
+    }
+
+    /// Makes the paragraph's CRDT text say `target`, returning the update
+    /// when it differed (a repair after an exact edit landed differently,
+    /// e.g. autocorrect changed the document).
+    pub fn sync(&mut self, para: &str, target: &str) -> Option<Vec<u8>> {
+        let current = self.text(para);
+        if current == target {
+            return None;
+        }
+        let (index, removed, inserted) = splice(&current, target);
+        self.local_edit_exact(para, index, removed.len() as u32, &inserted)
     }
 
     /// Applies a peer's update; returns the merged text of `para`.
@@ -84,34 +121,36 @@ impl TextMerge {
     /// broadcast and the merged text after the undo. Nothing when the local
     /// author has no edit to undo.
     pub fn undo_local(&mut self) -> Option<(String, Vec<u8>, String)> {
-        let entry = self.undo.pop()?;
-        let current = self.text(&entry.para);
-        let update = {
-            let text = self.text_ref(&entry.para);
-            let mut txn = self.doc.transact_mut();
-            if !entry.inserted.is_empty() {
-                // The text this edit inserted, wherever it landed among a
-                // peer's concurrent edits.
-                let at = nearest(&current, &entry.inserted, entry.index);
-                text.remove_range(&mut txn, at, entry.inserted.len() as u32);
-                if !entry.removed.is_empty() {
-                    // Put back what that edit had replaced, in its place.
-                    text.insert(&mut txn, at, &entry.removed);
-                }
-            } else if !entry.removed.is_empty() {
-                let at = entry.index.min(current.len() as u32);
-                text.insert(&mut txn, at, &entry.removed);
+        let paras: Vec<String> = self.managers.keys().cloned().collect();
+        for para in paras {
+            let can_undo = match self.managers.get(&para) {
+                Some(m) => m.can_undo(),
+                None => false,
+            };
+            if !can_undo {
+                continue;
             }
-            txn.encode_update_v1()
-        };
-        let merged = self.text(&entry.para);
-        Some((entry.para, update, merged))
+            let before = self.doc.transact().state_vector();
+            let undone = match self.managers.get_mut(&para) {
+                Some(m) => m.undo_blocking(),
+                None => false,
+            };
+            if !undone {
+                continue;
+            }
+            let update = {
+                let txn = self.doc.transact();
+                txn.encode_state_as_update_v1(&before)
+            };
+            return Some((para.clone(), update, self.text(&para)));
+        }
+        None
     }
 }
 
 /// The single contiguous change from `before` to `after`: the byte index,
 /// the removed text and the inserted text. Byte offsets, like the apps'.
-fn splice(before: &str, after: &str) -> (u32, String, String) {
+pub(crate) fn splice(before: &str, after: &str) -> (u32, String, String) {
     let max = before.len().min(after.len());
     let mut pre = 0;
     while pre < max && before.as_bytes()[pre] == after.as_bytes()[pre] {
@@ -130,33 +169,14 @@ fn splice(before: &str, after: &str) -> (u32, String, String) {
     (pre as u32, before[pre..before.len() - suf].to_string(), after[pre..after.len() - suf].to_string())
 }
 
-/// The occurrence of `needle` in `hay` closest to `at`; `at` clamped when
-/// there is none.
-fn nearest(hay: &str, needle: &str, at: u32) -> u32 {
-    let mut best: Option<usize> = None;
-    let mut from = 0;
-    while let Some(i) = hay[from..].find(needle) {
-        let pos = from + i;
-        best = match best {
-            Some(b) if (b as i64 - at as i64).abs() <= (pos as i64 - at as i64).abs() => Some(b),
-            _ => Some(pos),
-        };
-        from = pos + 1;
-        if from >= hay.len() {
-            break;
-        }
-    }
-    best.map(|b| b as u32).unwrap_or_else(|| at.min(hay.len() as u32))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn two_editors_converge() {
-        let mut a = TextMerge::new();
-        let mut b = TextMerge::new();
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
 
         // A and B type into the same empty paragraph, before hearing from
         // each other.
@@ -183,8 +203,8 @@ mod tests {
 
     #[test]
     fn undo_is_per_author() {
-        let mut a = TextMerge::new();
-        let mut b = TextMerge::new();
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
 
         let ua = a.local_edit("p1", "", "Hello ").expect("A's edit");
         let ub = b.local_edit("p1", "", "world").expect("B's edit");
@@ -200,5 +220,32 @@ mod tests {
         let tb = b.apply_update("p1", &update).expect("B applies the undo");
         assert_eq!(tb, "world");
         assert_eq!(b.text("p1"), "world");
+    }
+
+    #[test]
+    fn undo_survives_interleaved_edits() {
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
+
+        // A and B each type a full sentence into the same empty paragraph.
+        // The typed edit is exact (caret + text), as the app captures it —
+        // not a text diff, which is ambiguous here.
+        let ua = a.local_edit_exact("p1", 0, 0, "Hello from Alice. ").expect("A's edit");
+        let _ = b.apply_update("p1", &ua).expect("B applies A");
+        let ub = b.local_edit_exact("p1", 0, 0, "Hi from Bob. ").expect("B's edit");
+        let _ = a.apply_update("p1", &ub).expect("A applies B");
+        assert_eq!(a.text("p1"), b.text("p1"));
+
+        // A undoes first; B's text survives.
+        let (_, update, merged) = a.undo_local().expect("A undoes");
+        let _ = b.apply_update("p1", &update).expect("B applies A's undo");
+        assert_eq!(merged, "Hi from Bob. ", "A's undo left only B's text: {merged:?}");
+        assert_eq!(b.text("p1"), "Hi from Bob. ");
+
+        // B undoes too; now nothing is left.
+        let (_, update, merged) = b.undo_local().expect("B undoes");
+        let _ = a.apply_update("p1", &update).expect("A applies B's undo");
+        assert_eq!(merged, "");
+        assert_eq!(a.text("p1"), "");
     }
 }
