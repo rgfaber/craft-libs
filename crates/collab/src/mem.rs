@@ -1,28 +1,39 @@
-//! An in-memory transport: two endpoints whose messages travel the other
-//! way. For tests and dry runs of an adoption before a network adapter is
-//! attached.
+//! An in-memory transport: endpoints that exchange messages. For tests and
+//! dry runs of an adoption before a network adapter is attached.
 
 use std::sync::{Arc, Mutex};
 
 use crate::message::Message;
 use crate::transport::Transport;
 
-/// One endpoint of an in-memory pair.
+/// One endpoint: what it sends goes to every other endpoint on its bus, and
+/// what it polls is what it has received.
 pub struct MemoryTransport {
     author: String,
     inbound: Arc<Mutex<Vec<Message>>>,
-    outbound: Arc<Mutex<Vec<Message>>>,
+    /// Every bus endpoint's inbound queue.
+    fanout: Vec<Arc<Mutex<Vec<Message>>>>,
+    me: usize,
 }
 
 impl MemoryTransport {
     /// Two endpoints: what one sends, the other polls.
     pub fn pair(author_a: &str, author_b: &str) -> (MemoryTransport, MemoryTransport) {
-        let to_a = Arc::new(Mutex::new(Vec::new()));
-        let to_b = Arc::new(Mutex::new(Vec::new()));
-        (
-            MemoryTransport { author: author_a.to_string(), inbound: to_a.clone(), outbound: to_b.clone() },
-            MemoryTransport { author: author_b.to_string(), inbound: to_b, outbound: to_a },
-        )
+        let mut bus = Self::bus(&[author_a, author_b]);
+        let second = bus.pop().unwrap_or_else(|| unreachable!("bus built two endpoints"));
+        let first = bus.pop().unwrap_or_else(|| unreachable!("bus built two endpoints"));
+        (first, second)
+    }
+
+    /// Endpoints on one bus: what any sends, all the others poll. Models a
+    /// pubsub topic with several subscribers.
+    pub fn bus(authors: &[&str]) -> Vec<MemoryTransport> {
+        let queues: Vec<Arc<Mutex<Vec<Message>>>> = authors.iter().map(|_| Arc::new(Mutex::new(Vec::new()))).collect();
+        authors
+            .iter()
+            .enumerate()
+            .map(|(me, author)| MemoryTransport { author: author.to_string(), inbound: queues[me].clone(), fanout: queues.clone(), me })
+            .collect()
     }
 }
 
@@ -32,7 +43,12 @@ impl Transport for MemoryTransport {
     }
 
     fn send(&mut self, msg: Message) -> Result<(), String> {
-        self.outbound.lock().map_err(|e| e.to_string())?.push(msg);
+        for (i, queue) in self.fanout.iter().enumerate() {
+            if i == self.me {
+                continue;
+            }
+            queue.lock().map_err(|e| e.to_string())?.push(msg.clone());
+        }
         Ok(())
     }
 

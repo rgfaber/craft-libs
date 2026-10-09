@@ -25,8 +25,10 @@ pub struct Message {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Kind {
     /// A paragraph text change, as a CRDT update. The update is
-    /// position-independent: peers may apply it in any order, once.
-    TextEdit { para: String, update: Vec<u8> },
+    /// position-independent: peers may apply it in any order, once. When the
+    /// sender knows the inserted text's formatting (its own typing), it
+    /// carries it so the peer's runs match; `None` lets the receiver infer.
+    TextEdit { para: String, update: Vec<u8>, props: Option<Vec<u8>> },
     /// Where the author's cursor is now: an app-encoded position, opaque to
     /// the mechanism, plus the display name to show next to it.
     CursorMoved { position: Option<String>, name: Option<String> },
@@ -37,8 +39,9 @@ pub enum Kind {
     /// A peer joining asks for the shared document's current state.
     SnapshotRequest {},
     /// The document's current state, as the app's [`DocAdapter`] encodes it
-    /// (stable ids included), so a joining peer starts aligned.
+    /// (stable ids included), plus this CRDT's every change, so a joining
+    /// peer starts aligned and keeps merging.
     ///
     /// [`DocAdapter`]: crate::host::DocAdapter
-    Snapshot { data: Vec<u8> },
+    Snapshot { data: Vec<u8>, crdt: Vec<u8> },
 }

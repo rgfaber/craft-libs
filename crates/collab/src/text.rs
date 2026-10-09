@@ -105,6 +105,21 @@ impl TextMerge {
         self.local_edit_exact(para, index, removed.len() as u32, &inserted)
     }
 
+    /// Every change this CRDT holds, from the beginning: what a joining peer
+    /// needs to seed an empty CRDT to this state.
+    pub fn full_update(&self) -> Vec<u8> {
+        let txn = self.doc.transact();
+        txn.encode_state_as_update_v1(&yrs::StateVector::default())
+    }
+
+    /// Applies a document-wide update (a seed or a sync); the caller
+    /// reconciles whatever paragraphs it changed.
+    pub fn apply_doc_update(&mut self, update: &[u8]) -> Result<(), String> {
+        let update = Update::decode_v1(update).map_err(|e| format!("{e:?}"))?;
+        let mut txn = self.doc.transact_mut();
+        txn.apply_update(update).map_err(|e| format!("{e:?}"))
+    }
+
     /// Applies a peer's update; returns the merged text of `para`.
     pub fn apply_update(&mut self, para: &str, update: &[u8]) -> Result<String, String> {
         let update = Update::decode_v1(update).map_err(|e| format!("{e:?}"))?;
