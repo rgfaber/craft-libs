@@ -198,6 +198,9 @@ pub struct Access {
     host: String,
     verifier: Option<Arc<dyn GrantVerifier>>,
     holders: BTreeMap<String, Grant>,
+    /// The signed grants as installed, so a restarted peer can re-learn its
+    /// holders without new signatures from the host.
+    signed: BTreeMap<String, SignedGrant>,
     /// Revocations by holder: the highest `issued_ms` revoked; a grant no
     /// newer than this cannot install, a newer one is the host re-inviting.
     revoked: BTreeMap<String, u64>,
@@ -226,7 +229,14 @@ impl Access {
     /// An access table for `doc` whose host is `host` (hex node id), with
     /// `verifier` checking every installed grant.
     pub fn new(doc: &str, host: &str, verifier: Arc<dyn GrantVerifier>) -> Self {
-        Access { doc: doc.to_string(), host: host.to_string(), verifier: Some(verifier), holders: BTreeMap::new(), revoked: BTreeMap::new() }
+        Access {
+            doc: doc.to_string(),
+            host: host.to_string(),
+            verifier: Some(verifier),
+            holders: BTreeMap::new(),
+            signed: BTreeMap::new(),
+            revoked: BTreeMap::new(),
+        }
     }
 
     pub fn doc(&self) -> &str {
@@ -259,20 +269,22 @@ impl Access {
         if self.revoked.get(&grant.holder).is_some_and(|at| grant.issued_ms <= *at) {
             return Err("the holder was revoked after this grant was issued".into());
         }
-        self.install_newer(grant)
+        self.install_newer(grant, signed.clone())
     }
 
     /// The monotonic step: replace only on a strictly newer grant.
-    fn install_newer(&mut self, grant: Grant) -> Result<(), String> {
+    fn install_newer(&mut self, grant: Grant, signed: SignedGrant) -> Result<(), String> {
         match self.holders.get(&grant.holder) {
             None => {
                 self.holders.insert(grant.holder.clone(), grant);
+                self.signed.insert(signed.grant.holder.clone(), signed);
                 Ok(())
             }
             Some(current) => {
                 let newer = grant.issued_ms > current.issued_ms || (grant.issued_ms == current.issued_ms && grant.nonce > current.nonce);
                 if newer {
                     self.holders.insert(grant.holder.clone(), grant);
+                    self.signed.insert(signed.grant.holder.clone(), signed);
                     Ok(())
                 } else {
                     Err("a stale grant does not replace a newer one".into())
@@ -283,7 +295,14 @@ impl Access {
 
     /// Removes a holder (a local revocation).
     pub fn remove(&mut self, holder: &str) -> bool {
+        self.signed.remove(holder);
         self.holders.remove(holder).is_some()
+    }
+
+    /// The signed grants as installed, in holder order: what a restarted
+    /// peer persists and re-installs.
+    pub fn signed_grants(&self) -> Vec<SignedGrant> {
+        self.signed.values().cloned().collect()
     }
 
     /// Applies a host-signed revocation: verified like a grant, then the
@@ -305,6 +324,7 @@ impl Access {
         *entry = (*entry).max(revocation.issued_ms);
         if self.holders.get(&revocation.holder).is_some_and(|grant| grant.issued_ms <= revocation.issued_ms) {
             self.holders.remove(&revocation.holder);
+            self.signed.remove(&revocation.holder);
         }
         Ok(())
     }
