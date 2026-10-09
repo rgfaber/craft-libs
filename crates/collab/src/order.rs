@@ -1,15 +1,19 @@
 //! Per-author message ordering.
 //!
-//! Every message carries its author's sequence number. Text updates are
-//! order-insensitive, but a command must be applied after the messages its
-//! author sent before it, and exactly once: this buffer delivers one
-//! author's messages in sequence, holding a gap until it fills, and drops
-//! anything already delivered.
+//! Every message carries its author's sequence number, within this process's
+//! epoch. Text updates are order-insensitive, but a command must be applied
+//! after the messages its author sent before it, and exactly once: this
+//! buffer delivers one author's messages in sequence, holding a gap until it
+//! fills, and drops anything already delivered.
 //!
 //! A subscriber that joins mid-stream never sees seq 1: the first message
-//! heard from an author sets that author's base, and order is enforced from
+//! heard from an author and epoch sets the base, and order is enforced from
 //! there. Messages from before the join are not recoverable (pubsub has no
 //! replay); a joiner catches up through the document snapshot instead.
+//!
+//! Epochs separate a peer's sessions: a restarted process (same author id,
+//! fresh epoch, seq back at 1) delivers as its own stream and neither
+//! blocks nor is dropped by the old one.
 
 use std::collections::HashMap;
 
@@ -19,27 +23,31 @@ use crate::message::Message;
 /// dropped (a peer that never fills its gap must not grow this without bound).
 const HELD_LIMIT: usize = 512;
 
-/// Reorders messages by author and seq.
+/// One author+epoch stream.
+type Stream = (String, u64);
+
+/// Reorders messages by author, epoch and seq.
 #[derive(Default)]
 pub struct OrderBuffer {
-    /// The next seq awaited per author, set from the first message heard.
-    next: HashMap<String, u64>,
-    /// Messages whose gap has not filled yet, per author.
-    held: HashMap<String, Vec<Message>>,
+    /// The next seq awaited per stream, set from the first message heard.
+    next: HashMap<Stream, u64>,
+    /// Messages whose gap has not filled yet, per stream.
+    held: HashMap<Stream, Vec<Message>>,
 }
 
 impl OrderBuffer {
     /// Adds `msg` and returns every message now deliverable, in order.
     pub fn push(&mut self, msg: Message) -> Vec<Message> {
-        let Some(&next) = self.next.get(&msg.author) else {
-            // First message from this author: its seq is the base.
-            self.next.insert(msg.author.clone(), msg.seq + 1);
+        let stream: Stream = (msg.author.clone(), msg.epoch);
+        let Some(&next) = self.next.get(&stream) else {
+            // First message from this stream: its seq is the base.
+            self.next.insert(stream, msg.seq + 1);
             return vec![msg];
         };
         if msg.seq < next {
             return Vec::new(); // already delivered
         }
-        let held = self.held.entry(msg.author.clone()).or_default();
+        let held = self.held.entry(stream).or_default();
         if held.iter().all(|m| m.seq != msg.seq) {
             held.push(msg);
             if held.len() > HELD_LIMIT {
@@ -49,19 +57,19 @@ impl OrderBuffer {
         self.drain()
     }
 
-    /// Every held message that now follows its author's high-water mark.
+    /// Every held message that now follows its stream's high-water mark.
     fn drain(&mut self) -> Vec<Message> {
         let mut out = Vec::new();
         loop {
             let mut progressed = false;
-            let authors: Vec<String> = self.held.keys().cloned().collect();
-            for author in authors {
-                let next = *self.next.get(&author).unwrap_or(&1);
-                if let Some(held) = self.held.get_mut(&author)
+            let streams: Vec<Stream> = self.held.keys().cloned().collect();
+            for stream in streams {
+                let next = *self.next.get(&stream).unwrap_or(&1);
+                if let Some(held) = self.held.get_mut(&stream)
                     && let Some(pos) = held.iter().position(|m| m.seq == next)
                 {
                     out.push(held.remove(pos));
-                    self.next.insert(author.clone(), next + 1);
+                    self.next.insert(stream.clone(), next + 1);
                     progressed = true;
                 }
             }
@@ -79,7 +87,11 @@ mod tests {
     use crate::message::Kind;
 
     fn msg(author: &str, seq: u64) -> Message {
-        Message { doc: "d".into(), author: author.into(), seq, sent_at_ms: 0, kind: Kind::CursorMoved { position: None, name: None } }
+        msg_epoch(author, 0, seq)
+    }
+
+    fn msg_epoch(author: &str, epoch: u64, seq: u64) -> Message {
+        Message { doc: "d".into(), author: author.into(), epoch, seq, sent_at_ms: 0, kind: Kind::CursorMoved { position: None, name: None } }
     }
 
     #[test]
@@ -103,5 +115,20 @@ mod tests {
         let out = b.push(msg("c", 1));
         assert_eq!(out.len(), 1, "c's first delivers too");
         assert_eq!(out[0].author, "c");
+    }
+
+    #[test]
+    fn a_new_epoch_is_its_own_stream() {
+        let mut b = OrderBuffer::default();
+        let out = b.push(msg_epoch("a", 1, 7));
+        assert_eq!(out.len(), 1, "epoch 1's first delivers");
+        assert!(b.push(msg_epoch("a", 1, 9)).is_empty(), "a gap in epoch 1 holds");
+        // The peer restarts: same author, new epoch, seq back at 1.
+        let out = b.push(msg_epoch("a", 2, 1));
+        assert_eq!(out.len(), 1, "the new session delivers while the old epoch's gap is open");
+        assert_eq!(out[0].seq, 1);
+        let out = b.push(msg_epoch("a", 2, 2));
+        assert_eq!(out.len(), 1, "and its sequence is enforced separately");
+        assert_eq!(out[0].seq, 2);
     }
 }

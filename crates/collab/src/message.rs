@@ -10,7 +10,12 @@ pub struct Message {
     pub doc: String,
     /// The author's stable id (the mesh node id, hex).
     pub author: String,
-    /// Per-author sequence number, 1 upwards.
+    /// This process's session, random per launch: a restarted peer keeps its
+    /// author id but sends a new epoch, so receivers never confuse its
+    /// restarted sequence with the old one (0 for older peers).
+    #[serde(default)]
+    pub epoch: u64,
+    /// Per-author, per-epoch sequence number, 1 upwards.
     pub seq: u64,
     /// When the sender made it, milliseconds since the epoch: peer latency
     /// is the receiver's clock minus this (0 when unknown).
