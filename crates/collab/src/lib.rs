@@ -8,6 +8,7 @@
 //! [`DocAdapter`] (stable paragraph ids <-> text, snapshots), implemented
 //! once per app; wordcraft is first.
 
+pub mod grant;
 pub mod host;
 pub mod mem;
 pub mod message;
@@ -16,6 +17,7 @@ pub mod presence;
 pub mod text;
 pub mod transport;
 
+pub use grant::{Access, Admission, Grant, Role, SignedGrant};
 pub use host::{CollabHost, DocAdapter, Origin};
 pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
