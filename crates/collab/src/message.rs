@@ -49,4 +49,12 @@ pub enum Kind {
     ///
     /// [`DocAdapter`]: crate::host::DocAdapter
     Snapshot { data: Vec<u8>, crdt: Vec<u8> },
+    /// A joiner presenting an invite's open token to the host, plus its
+    /// display name.
+    JoinRequest { token: crate::grant::SignedGrant, name: String },
+    /// The host's answer to a join: the concrete grant for that holder,
+    /// broadcast so every replica can admit the new holder.
+    GrantIssued { grant: crate::grant::SignedGrant },
+    /// The host withdrawing a holder; every replica applies it.
+    Revoked { revocation: crate::grant::SignedRevocation },
 }

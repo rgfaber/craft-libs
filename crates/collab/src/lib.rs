@@ -10,6 +10,7 @@
 
 pub mod grant;
 pub mod host;
+pub mod invite;
 pub mod mem;
 pub mod message;
 pub mod order;
@@ -17,8 +18,9 @@ pub mod presence;
 pub mod text;
 pub mod transport;
 
-pub use grant::{Access, Admission, GRANT_VERSION, Grant, GrantVerifier, Role, SignedGrant};
+pub use grant::{Access, Admission, GRANT_VERSION, Grant, GrantIssuer, GrantVerifier, Revocation, Role, SignedGrant, SignedRevocation, mint_nonce};
 pub use host::{CollabHost, DocAdapter, Origin};
+pub use invite::{INVITE_VERSION, Invite};
 pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
 pub use order::OrderBuffer;

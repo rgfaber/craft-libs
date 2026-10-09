@@ -46,8 +46,12 @@ impl Role {
     pub fn permits(self, kind: &crate::message::Kind) -> bool {
         use crate::message::Kind;
         match (self, kind) {
-            // Either role may read, move its cursor and (re)join.
-            (_, Kind::CursorMoved { .. }) | (_, Kind::SnapshotRequest {}) => true,
+            // Either role may read: a reader asks for the document's state
+            // and receives one (from the host or from any live holder that
+            // carries it), moves its cursor and (re)joins.
+            (_, Kind::CursorMoved { .. })
+            | (_, Kind::SnapshotRequest {})
+            | (_, Kind::Snapshot { .. }) => true,
             (Role::Editor, Kind::TextEdit { .. }) | (Role::Editor, Kind::Command { .. }) => true,
             _ => false,
         }
@@ -69,15 +73,40 @@ pub struct Grant {
     pub issued_ms: u64,
     /// After this the grant is no longer live and must be renewed.
     pub expires_ms: u64,
-    /// Distinguishes otherwise identical grants; the tie-break for installs
-    /// with equal `issued_ms`.
+    /// Distinguishes otherwise identical grants and breaks install ties.
+    /// Mint it with [`mint_nonce`], whose zero-padded form orders
+    /// lexicographically by `issued_ms`, so a later grant is also the
+    /// "greater" nonce at equal timestamps.
     pub nonce: String,
 }
 
+/// The contract's nonce mint: a zero-padded `issued_ms`, then a salt that
+/// persists per grant. Lexicographic order equals time order.
+pub fn mint_nonce(issued_ms: u64, salt: u32) -> String {
+    format!("{issued_ms:016x}-{salt:08x}")
+}
+
+/// How much wall-clock disagreement a grant's liveness tolerates: a host
+/// whose clock is minutes ahead mints grants this peer sees as slightly
+/// future-dated, a joiner whose clock trails sees them expire minutes early.
+/// Five minutes absorbs both, deliberately loose for a real-time document.
+pub const GRANT_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
+
 impl Grant {
-    /// Whether this grant is live at `now_ms`.
+    /// Whether this grant is live at `now_ms`, within
+    /// [`GRANT_CLOCK_SKEW_MS`]. A receiver with no wall clock at all (wasm
+    /// reports 0) sees nothing live, so a clockless peer is refused rather
+    /// than silently trusted.
     pub fn is_live(&self, now_ms: u64) -> bool {
-        self.expires_ms > now_ms && self.issued_ms <= now_ms
+        self.expires_ms.saturating_add(GRANT_CLOCK_SKEW_MS) > now_ms
+            && self.issued_ms <= now_ms.saturating_add(GRANT_CLOCK_SKEW_MS)
+    }
+
+    /// An open invitation token: signed by the host with no holder yet; the
+    /// host turns it into a per-holder grant when a joiner presents it.
+    /// Never installable as a holder grant.
+    pub fn is_open(&self) -> bool {
+        self.holder.is_empty()
     }
 
     /// The bytes a signature covers: the domain context, then the grant's
@@ -98,13 +127,67 @@ pub struct SignedGrant {
     pub signature: Vec<u8>,
 }
 
+/// The host withdrawing one holder from one document. Signed like a grant
+/// but under its own domain context; revocation is monotonic (a re-install
+/// of a grant no newer than the revocation is refused, a newer grant is the
+/// host re-inviting the holder).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Revocation {
+    pub v: u32,
+    pub doc: String,
+    pub host: String,
+    pub holder: String,
+    pub issued_ms: u64,
+    pub nonce: String,
+}
+
+/// The signature context for revocations.
+pub const REVOCATION_CONTEXT: &[u8] = b"craft-collab/revocation/v1";
+
+impl Revocation {
+    /// The bytes a revocation signature covers.
+    pub fn signed_bytes(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::with_capacity(REVOCATION_CONTEXT.len() + 256);
+        bytes.extend_from_slice(REVOCATION_CONTEXT);
+        bytes.extend_from_slice(&serde_json::to_vec(self).map_err(|e| e.to_string())?);
+        Ok(bytes)
+    }
+}
+
+/// A revocation with its host signature.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SignedRevocation {
+    pub revocation: Revocation,
+    pub signature: Vec<u8>,
+}
+
 /// Verifies a signed grant's signature and returns the grant it carries.
 /// The adapter implements this with the host's carried key; a table without
-/// one cannot install anything.
+/// one cannot install anything, and cannot revoke.
 pub trait GrantVerifier: Send + Sync {
     /// Verifies `signed` at `now_ms`: the signature under the host key, the
     /// host id it derives, the version and the expiry.
     fn verify(&self, signed: &SignedGrant, now_ms: u64) -> Result<Grant, String>;
+
+    /// Verifies a revocation the same way (under the revocation context).
+    fn verify_revocation(&self, signed: &SignedRevocation, now_ms: u64) -> Result<Revocation, String>;
+}
+
+/// Mints grants, revocations and open tokens as the host. The adapter
+/// implements this over the identity's key; a session without one is never
+/// a host that can admit (it can still be a joiner).
+pub trait GrantIssuer: Send + Sync {
+    /// The host id the issuer signs as (hex): what grants name as `host`.
+    fn node_id(&self) -> String;
+    /// The host's carried public key: what its grants verify under.
+    fn carried_key(&self) -> Vec<u8>;
+    /// A concrete grant for one holder.
+    fn issue(&self, doc: &str, holder: &str, role: Role, ttl_ms: u64, now_ms: u64) -> Result<SignedGrant, String>;
+    /// A host-signed revocation of one holder.
+    fn revoke(&self, doc: &str, holder: &str, now_ms: u64) -> Result<SignedRevocation, String>;
+    /// An open invitation token: signed, no holder, so a joiner can present
+    /// it and the host turns it into the concrete grant.
+    fn open_token(&self, doc: &str, role: Role, ttl_ms: u64, now_ms: u64) -> Result<SignedGrant, String>;
 }
 
 /// Who may act on this document, as every replica checks it: the host, plus
@@ -115,6 +198,9 @@ pub struct Access {
     host: String,
     verifier: Option<Arc<dyn GrantVerifier>>,
     holders: BTreeMap<String, Grant>,
+    /// Revocations by holder: the highest `issued_ms` revoked; a grant no
+    /// newer than this cannot install, a newer one is the host re-inviting.
+    revoked: BTreeMap<String, u64>,
 }
 
 /// What an access check found.
@@ -140,7 +226,7 @@ impl Access {
     /// An access table for `doc` whose host is `host` (hex node id), with
     /// `verifier` checking every installed grant.
     pub fn new(doc: &str, host: &str, verifier: Arc<dyn GrantVerifier>) -> Self {
-        Access { doc: doc.to_string(), host: host.to_string(), verifier: Some(verifier), holders: BTreeMap::new() }
+        Access { doc: doc.to_string(), host: host.to_string(), verifier: Some(verifier), holders: BTreeMap::new(), revoked: BTreeMap::new() }
     }
 
     pub fn doc(&self) -> &str {
@@ -167,6 +253,12 @@ impl Access {
         if grant.host != self.host {
             return Err("the grant names another host".into());
         }
+        if grant.is_open() {
+            return Err("an open token is not a holder grant".into());
+        }
+        if self.revoked.get(&grant.holder).is_some_and(|at| grant.issued_ms <= *at) {
+            return Err("the holder was revoked after this grant was issued".into());
+        }
         self.install_newer(grant)
     }
 
@@ -189,9 +281,52 @@ impl Access {
         }
     }
 
-    /// Removes a holder (a revocation lands as removed grants).
+    /// Removes a holder (a local revocation).
     pub fn remove(&mut self, holder: &str) -> bool {
         self.holders.remove(holder).is_some()
+    }
+
+    /// Applies a host-signed revocation: verified like a grant, then the
+    /// holder is removed unless their grant is newer than the revocation
+    /// (the host re-invited them after revoking).
+    pub fn revoke(&mut self, signed: &SignedRevocation, now_ms: u64) -> Result<(), String> {
+        let verifier = self.verifier.clone().ok_or_else(|| "this access table has no grant verifier".to_string())?;
+        let revocation = verifier.verify_revocation(signed, now_ms)?;
+        if revocation.v != GRANT_VERSION {
+            return Err(format!("unsupported revocation version {}", revocation.v));
+        }
+        if revocation.doc != self.doc {
+            return Err("the revocation names another document".into());
+        }
+        if revocation.host != self.host {
+            return Err("the revocation names another host".into());
+        }
+        let entry = self.revoked.entry(revocation.holder.clone()).or_insert(0);
+        *entry = (*entry).max(revocation.issued_ms);
+        if self.holders.get(&revocation.holder).is_some_and(|grant| grant.issued_ms <= revocation.issued_ms) {
+            self.holders.remove(&revocation.holder);
+        }
+        Ok(())
+    }
+
+    /// Checks an open invitation token presented in a join request: signed
+    /// by this host and live; returns the token's role and expiry.
+    pub fn check_token(&self, signed: &SignedGrant, now_ms: u64) -> Result<Grant, String> {
+        let verifier = self.verifier.clone().ok_or_else(|| "this access table has no grant verifier".to_string())?;
+        let grant = verifier.verify(signed, now_ms)?;
+        if grant.v != GRANT_VERSION {
+            return Err(format!("unsupported grant version {}", grant.v));
+        }
+        if grant.doc != self.doc {
+            return Err("the token names another document".into());
+        }
+        if grant.host != self.host {
+            return Err("the token names another host".into());
+        }
+        if !grant.is_open() {
+            return Err("not an open token".into());
+        }
+        Ok(grant)
     }
 
     /// Checks a message's **verified** author: the host is always admitted,
@@ -243,6 +378,14 @@ mod tests {
                 return Err("not live".into());
             }
             Ok(signed.grant.clone())
+        }
+
+        fn verify_revocation(&self, signed: &SignedRevocation, now_ms: u64) -> Result<Revocation, String> {
+            if signed.signature != b"rsig" {
+                return Err("bad signature".into());
+            }
+            let _ = now_ms;
+            Ok(signed.revocation.clone())
         }
     }
 
@@ -331,8 +474,10 @@ mod tests {
         assert_eq!(access.admits("carol", &edit, 150), Admission::UnknownHolder);
         assert_eq!(access.admits("bob", &edit, 150), Admission::RoleRefused, "a viewer does not write");
         assert!(access.admits("bob", &cursor, 150).is_admitted(), "a viewer may move its cursor");
-        assert_eq!(access.admits("bob", &cursor, 250), Admission::Expired);
-        assert_eq!(access.admits_reader("bob", 250), Admission::Expired, "expiry also stops reads");
+        // Expiry is enforced once the clock skew can no longer explain it.
+        let past_skew = 200 + GRANT_CLOCK_SKEW_MS + 1;
+        assert_eq!(access.admits("bob", &cursor, past_skew), Admission::Expired);
+        assert_eq!(access.admits_reader("bob", past_skew), Admission::Expired, "expiry also stops reads");
     }
 
     #[test]
@@ -344,10 +489,80 @@ mod tests {
     }
 
     #[test]
+    fn liveness_tolerates_minutes_of_clock_disagreement() {
+        let table = || Access::new("doc", "host", std::sync::Arc::new(FakeVerifier));
+        let grant = signed("doc", "host", "h", Role::Editor, 1_000_000, 2_000_000, "n");
+        // A joiner whose clock trails by four minutes: the grant looks
+        // future-dated but is accepted within the skew.
+        let mut early = table();
+        early.install(&grant, 1_000_000 - 4 * 60_000).expect("four minutes behind is tolerated");
+        // Past the skew, the same grant is refused.
+        let mut late = table();
+        assert!(late.install(&grant, 1_000_000 - 6 * 60_000).is_err());
+        // Clockless (wasm, 0): nothing is live, nothing installs.
+        let mut clockless = table();
+        assert!(clockless.install(&grant, 0).is_err(), "a peer with no clock trusts no grant");
+    }
+
+    #[test]
     fn revocation_is_removal() {
         let mut access = table("doc", "host");
         access.install(&signed("doc", "host", "dave", Role::Editor, 100, 10_000, "n"), 150).expect("install");
         assert!(access.remove("dave"));
         assert_eq!(access.admits("dave", &Kind::CursorMoved { position: None, name: None }, 150), Admission::UnknownHolder);
+    }
+
+    fn revocation(doc: &str, host: &str, holder: &str, issued: u64) -> SignedRevocation {
+        SignedRevocation {
+            revocation: Revocation {
+                v: GRANT_VERSION,
+                doc: doc.into(),
+                host: host.into(),
+                holder: holder.into(),
+                issued_ms: issued,
+                nonce: mint_nonce(issued, 1),
+            },
+            signature: b"rsig".to_vec(),
+        }
+    }
+
+    #[test]
+    fn an_open_token_never_installs_but_checks() {
+        let mut access = table("doc", "host");
+        let mut token = signed("doc", "host", "", Role::Editor, 100, 200, "open");
+        token.grant.holder = String::new();
+        assert!(access.install(&token, 150).is_err(), "an open token is not a holder grant");
+        let checked = access.check_token(&token, 150).expect("the host can check its own token");
+        assert!(checked.is_open());
+        assert_eq!(checked.role, Role::Editor);
+        assert!(
+            access.check_token(&token, 200 + GRANT_CLOCK_SKEW_MS + 1).is_err(),
+            "an expired token is refused once past the clock skew"
+        );
+    }
+
+    #[test]
+    fn revocation_removes_and_blocks_older_installs() {
+        let mut access = table("doc", "host");
+        let grant = signed("doc", "host", "fred", Role::Editor, 100, 10_000, "n");
+        access.install(&grant, 150).expect("install");
+        access.revoke(&revocation("doc", "host", "fred", 150), 150).expect("revoke");
+        assert_eq!(access.admits("fred", &Kind::CursorMoved { position: None, name: None }, 150), Admission::UnknownHolder, "revoked");
+        assert!(access.install(&grant, 150).is_err(), "the revoked grant cannot come back");
+        // The host re-invites with a newer grant: that is allowed.
+        let newer = signed("doc", "host", "fred", Role::Viewer, 200, 10_000, "n2");
+        access.install(&newer, 250).expect("re-invite installs");
+        assert!(access.admits("fred", &Kind::CursorMoved { position: None, name: None }, 250).is_admitted());
+    }
+
+    #[test]
+    fn a_stale_revocation_keeps_a_newer_grant() {
+        let mut access = table("doc", "host");
+        access.install(&signed("doc", "host", "gina", Role::Editor, 200, 10_000, "n"), 250).expect("newer grant");
+        access.revoke(&revocation("doc", "host", "gina", 150), 250).expect("late revocation");
+        assert!(
+            access.admits("gina", &Kind::CursorMoved { position: None, name: None }, 250).is_admitted(),
+            "the grant is newer than the revocation"
+        );
     }
 }
