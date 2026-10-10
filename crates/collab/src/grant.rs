@@ -170,6 +170,18 @@ pub trait GrantVerifier: Send + Sync {
     fn verify_revocation(&self, signed: &SignedRevocation, now_ms: u64) -> Result<Revocation, String>;
 }
 
+/// Verifies a realm membership a joiner presents when the host shares a
+/// document with a realm: the proof must be the caller's own (audience =
+/// the verified node id) and must not be expired. The adapter implements
+/// this over the realm's UCAN verification; the engine never sees a token.
+pub trait MembershipVerifier: Send + Sync {
+    /// Verifies that `ucan` is a live membership of this host's realm for
+    /// `node_id`.
+    fn verify_member(&self, ucan: &str, node_id: &str, now_ms: u64) -> Result<(), String>;
+    /// The role realm members are admitted with (the host's mapping).
+    fn role(&self) -> Role;
+}
+
 /// Mints grants, revocations and open tokens as the host. The adapter
 /// implements this over the identity's key; a session without one is never
 /// a host that can admit (it can still be a joiner).

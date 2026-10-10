@@ -49,9 +49,17 @@ pub enum Kind {
     ///
     /// [`DocAdapter`]: crate::host::DocAdapter
     Snapshot { data: Vec<u8>, crdt: Vec<u8> },
-    /// A joiner presenting an invite's open token to the host, plus its
-    /// display name.
-    JoinRequest { token: crate::grant::SignedGrant, name: String },
+    /// A joiner presenting its admission to the host, plus its display
+    /// name: the invite's open token when it has one, and/or a realm
+    /// membership UCAN when the host shares with a realm.
+    JoinRequest {
+        #[serde(default)]
+        token: Option<crate::grant::SignedGrant>,
+        name: String,
+        /// A realm membership UCAN: the audience must be this node.
+        #[serde(default)]
+        membership: Option<String>,
+    },
     /// The host's answer to a join: the concrete grant for that holder,
     /// broadcast so every replica can admit the new holder.
     GrantIssued { grant: crate::grant::SignedGrant },

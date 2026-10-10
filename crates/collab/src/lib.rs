@@ -18,7 +18,10 @@ pub mod presence;
 pub mod text;
 pub mod transport;
 
-pub use grant::{Access, Admission, GRANT_VERSION, Grant, GrantIssuer, GrantVerifier, Revocation, Role, SignedGrant, SignedRevocation, mint_nonce};
+pub use grant::{
+    Access, Admission, GRANT_VERSION, Grant, GrantIssuer, GrantVerifier, MembershipVerifier, Revocation, Role, SignedGrant, SignedRevocation,
+    mint_nonce,
+};
 pub use host::{CollabHost, DocAdapter, Origin};
 pub use invite::{INVITE_VERSION, Invite};
 pub use mem::MemoryTransport;

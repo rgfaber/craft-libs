@@ -6,11 +6,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::grant::SignedGrant;
+use crate::grant::{Role, SignedGrant};
 
-/// The layout version. 2 added the host's signature over the envelope:
-/// version 1 invites (unsigned) are refused outright.
-pub const INVITE_VERSION: u32 = 2;
+/// The layout version. 2 added the host's signature over the envelope
+/// (version 1 invites are refused outright); 3 made the open token optional
+/// and added the realm-member role: a realm invite carries no token and is
+/// admitted by a live membership of `realm` instead.
+pub const INVITE_VERSION: u32 = 3;
 
 /// The signature context for invites.
 pub const INVITE_CONTEXT: &[u8] = b"craft-collab/invite/v1";
@@ -44,8 +46,14 @@ pub struct Invite {
     pub seed: String,
     pub issued_ms: u64,
     pub expires_ms: u64,
-    /// The host-signed open token the joiner presents.
-    pub token: SignedGrant,
+    /// The host-signed open token the joiner presents; a realm invite
+    /// carries none and is admitted by membership instead.
+    #[serde(default)]
+    pub token: Option<SignedGrant>,
+    /// Set on a realm invite: members of `realm` presenting a live
+    /// membership UCAN are admitted with this role.
+    #[serde(default)]
+    pub member_role: Option<Role>,
     /// The host's signature over [`Invite::signed_bytes`]: every envelope
     /// field and the token, so a joiner can verify exactly who invited it
     /// and that nothing (seed, realm, expiry, token) was swapped on the way.
@@ -68,7 +76,8 @@ struct InviteBody<'a> {
     seed: &'a str,
     issued_ms: u64,
     expires_ms: u64,
-    token: &'a SignedGrant,
+    token: Option<&'a SignedGrant>,
+    member_role: Option<Role>,
 }
 
 impl Invite {
@@ -86,7 +95,8 @@ impl Invite {
             seed: &self.seed,
             issued_ms: self.issued_ms,
             expires_ms: self.expires_ms,
-            token: &self.token,
+            token: self.token.as_ref(),
+            member_role: self.member_role,
         };
         let mut bytes = Vec::with_capacity(INVITE_CONTEXT.len() + 512);
         bytes.extend_from_slice(INVITE_CONTEXT);
@@ -132,7 +142,7 @@ mod tests {
             seed: "station.example:4433:dd".repeat(32),
             issued_ms: 100,
             expires_ms: 200,
-            token: SignedGrant {
+            token: Some(SignedGrant {
                 grant: Grant {
                     v: GRANT_VERSION,
                     doc: "doc-1".into(),
@@ -144,7 +154,8 @@ mod tests {
                     nonce: "n".into(),
                 },
                 signature: vec![1, 2, 3],
-            },
+            }),
+            member_role: None,
             signature: vec![9, 9, 9],
         }
     }
@@ -169,7 +180,20 @@ mod tests {
 
     #[test]
     fn the_token_is_open() {
-        assert!(invite().token.grant.is_open());
+        assert!(invite().token.as_ref().expect("token").grant.is_open());
+    }
+
+    #[test]
+    fn a_realm_invite_carries_no_token_and_names_the_member_role() {
+        let mut realm_invite = invite();
+        realm_invite.token = None;
+        realm_invite.member_role = Some(Role::Viewer);
+        let line = realm_invite.encode().expect("encode");
+        let back = Invite::decode(&line).expect("decode");
+        assert!(back.token.is_none(), "a realm invite needs no token");
+        assert_eq!(back.member_role, Some(Role::Viewer));
+        // The role is covered by the signature.
+        assert_ne!(realm_invite.signed_bytes().expect("bytes"), invite().signed_bytes().expect("bytes"),);
     }
 
     #[test]
@@ -184,7 +208,7 @@ mod tests {
         tampered.expires_ms += 1;
         assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the expiry is covered");
         let mut tampered = invite();
-        tampered.token.signature.push(4);
+        tampered.token.as_mut().expect("token").signature.push(4);
         assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the token is covered");
         // The signature itself is not part of what is signed.
         let mut tampered = invite();
