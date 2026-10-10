@@ -49,9 +49,7 @@ impl Role {
             // Either role may read: a reader asks for the document's state
             // and receives one (from the host or from any live holder that
             // carries it), moves its cursor and (re)joins.
-            (_, Kind::CursorMoved { .. })
-            | (_, Kind::SnapshotRequest {})
-            | (_, Kind::Snapshot { .. }) => true,
+            (_, Kind::CursorMoved { .. }) | (_, Kind::SnapshotRequest {}) | (_, Kind::Snapshot { .. }) => true,
             (Role::Editor, Kind::TextEdit { .. }) | (Role::Editor, Kind::Command { .. }) => true,
             _ => false,
         }
@@ -98,8 +96,7 @@ impl Grant {
     /// reports 0) sees nothing live, so a clockless peer is refused rather
     /// than silently trusted.
     pub fn is_live(&self, now_ms: u64) -> bool {
-        self.expires_ms.saturating_add(GRANT_CLOCK_SKEW_MS) > now_ms
-            && self.issued_ms <= now_ms.saturating_add(GRANT_CLOCK_SKEW_MS)
+        self.expires_ms.saturating_add(GRANT_CLOCK_SKEW_MS) > now_ms && self.issued_ms <= now_ms.saturating_add(GRANT_CLOCK_SKEW_MS)
     }
 
     /// An open invitation token: signed by the host with no holder yet; the
@@ -563,10 +560,7 @@ mod tests {
         let checked = access.check_token(&token, 150).expect("the host can check its own token");
         assert!(checked.is_open());
         assert_eq!(checked.role, Role::Editor);
-        assert!(
-            access.check_token(&token, 200 + GRANT_CLOCK_SKEW_MS + 1).is_err(),
-            "an expired token is refused once past the clock skew"
-        );
+        assert!(access.check_token(&token, 200 + GRANT_CLOCK_SKEW_MS + 1).is_err(), "an expired token is refused once past the clock skew");
     }
 
     #[test]
