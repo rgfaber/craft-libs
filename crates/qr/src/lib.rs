@@ -106,6 +106,28 @@ mod tests {
         assert!(m.dark(6, 8) && m.dark(8, 6), "the timing patterns run between the finders");
     }
 
+    /// A real decoder reads the link back out of the drawn symbol: the
+    /// matrices this helper produces are scannable, not just shaped.
+    #[test]
+    fn a_decoder_reads_the_link_back() {
+        let link = "https://realm.macula.io/join/01a1247f-9c9b-7364-9155-d9514a958baf";
+        let m = matrix(link).expect("encode");
+        let scale = 8usize;
+        let quiet = 4usize;
+        let side = (m.width + 2 * quiet) * scale;
+        let mut img = rqrr::PreparedImage::prepare_from_greyscale(side, side, |x, y| {
+            let (gx, gy) = (x / scale, y / scale);
+            if gx < quiet || gy < quiet || gx >= quiet + m.width || gy >= quiet + m.width {
+                return 255;
+            }
+            if m.dark(gy - quiet, gx - quiet) { 0u8 } else { 255u8 }
+        });
+        let grids = img.detect_grids();
+        assert!(!grids.is_empty(), "a QR grid is found in the drawing");
+        let decoded = grids[0].decode().expect("the grid decodes");
+        assert_eq!(decoded.1, link, "the decoded text is exactly the link");
+    }
+
     #[test]
     fn the_same_text_always_encodes_to_the_same_matrix() {
         let a = matrix("https://example.org/join/x").expect("encode");

@@ -11,3 +11,7 @@ workspace = true
 
 [dependencies]
 qrcode = { version = "0.14", default-features = false }
+
+[dev-dependencies]
+# A real decoder, so the tests prove the symbol reads back, not just its shape
+rqrr = "0.9"
