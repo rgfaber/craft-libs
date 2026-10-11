@@ -341,9 +341,31 @@ impl Access {
         Ok(())
     }
 
+    /// Checks an invitation token presented by `requester` in a join
+    /// request: signed by this host and live, and either an open token or one
+    /// pre-named for exactly this node (an invite-by-person). Returns the
+    /// token's role and expiry.
+    pub fn check_token_for(&self, signed: &SignedGrant, requester: &str, now_ms: u64) -> Result<Grant, String> {
+        let grant = self.verified_token(signed, now_ms)?;
+        if !grant.is_open() && grant.holder != requester {
+            return Err("this invitation names another node".into());
+        }
+        Ok(grant)
+    }
+
     /// Checks an open invitation token presented in a join request: signed
     /// by this host and live; returns the token's role and expiry.
     pub fn check_token(&self, signed: &SignedGrant, now_ms: u64) -> Result<Grant, String> {
+        let grant = self.verified_token(signed, now_ms)?;
+        if !grant.is_open() {
+            return Err("not an open token".into());
+        }
+        Ok(grant)
+    }
+
+    /// The verified token, before the holder test: signed by this host, live,
+    /// and for this document.
+    fn verified_token(&self, signed: &SignedGrant, now_ms: u64) -> Result<Grant, String> {
         let verifier = self.verifier.clone().ok_or_else(|| "this access table has no grant verifier".to_string())?;
         let grant = verifier.verify(signed, now_ms)?;
         if grant.v != GRANT_VERSION {
@@ -354,9 +376,6 @@ impl Access {
         }
         if grant.host != self.host {
             return Err("the token names another host".into());
-        }
-        if !grant.is_open() {
-            return Err("not an open token".into());
         }
         Ok(grant)
     }
@@ -542,6 +561,20 @@ mod tests {
     }
 
     #[test]
+    fn a_token_named_for_one_node_is_refused_for_another() {
+        let mut access = table("doc", "host");
+        // An invite-by-person: a pre-named holder, not an open token.
+        access.install(&signed("doc", "host", "bbbbbbbb", Role::Editor, 100, 10_000, "named"), 150).expect("a named token installs as a grant");
+        let named = signed("doc", "host", "bbbbbbbb", Role::Editor, 100, 10_000, "named");
+        assert!(access.check_token_for(&named, "bbbbbbbb", 150).is_ok(), "its own person may use it");
+        assert!(access.check_token_for(&named, "cccccccc", 150).is_err(), "another node is refused");
+        assert!(access.check_token(&named, 150).is_err(), "and it is not an open token");
+        // An open token stays open for anyone.
+        let open = signed("doc", "host", "", Role::Viewer, 100, 10_000, "open");
+        assert!(access.check_token_for(&open, "dddddddd", 150).is_ok());
+    }
+
+    #[test]
     fn revocation_is_removal() {
         let mut access = table("doc", "host");
         access.install(&signed("doc", "host", "dave", Role::Editor, 100, 10_000, "n"), 150).expect("install");
@@ -561,6 +594,21 @@ mod tests {
             },
             signature: b"rsig".to_vec(),
         }
+    }
+
+    /// An invite for one person admits exactly that node: the pre-named
+    /// token is checked against the verified requester.
+    #[test]
+    fn a_prenamed_token_admits_only_its_holder() {
+        let access = table("doc", "host");
+        let mut token = signed("doc", "host", "", Role::Editor, 100, 10_000, "n");
+        token.grant.holder = "bob".into();
+        assert!(access.check_token_for(&token, "bob", 150).is_ok(), "the named node is admitted");
+        assert!(access.check_token_for(&token, "carol", 150).is_err(), "another node is refused");
+        assert!(access.check_token(&token, 150).is_err(), "and it is not an open token");
+        let mut open = token.clone();
+        open.grant.holder = String::new();
+        assert!(access.check_token_for(&open, "carol", 150).is_ok(), "an open token still admits anyone");
     }
 
     #[test]

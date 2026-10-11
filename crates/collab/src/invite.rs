@@ -54,6 +54,13 @@ pub struct Invite {
     /// membership UCAN are admitted with this role.
     #[serde(default)]
     pub member_role: Option<Role>,
+    /// An invite-by-person: the node this invite is for (hex). The token
+    /// then carries that holder, and every other node is refused at the door.
+    #[serde(default)]
+    pub invitee: Option<String>,
+    /// That person's display name, for the host's own copy.
+    #[serde(default)]
+    pub invitee_name: Option<String>,
     /// The host's signature over [`Invite::signed_bytes`]: every envelope
     /// field and the token, so a joiner can verify exactly who invited it
     /// and that nothing (seed, realm, expiry, token) was swapped on the way.
@@ -78,6 +85,8 @@ struct InviteBody<'a> {
     expires_ms: u64,
     token: Option<&'a SignedGrant>,
     member_role: Option<Role>,
+    invitee: Option<&'a str>,
+    invitee_name: Option<&'a str>,
 }
 
 impl Invite {
@@ -97,6 +106,8 @@ impl Invite {
             expires_ms: self.expires_ms,
             token: self.token.as_ref(),
             member_role: self.member_role,
+            invitee: self.invitee.as_deref(),
+            invitee_name: self.invitee_name.as_deref(),
         };
         let mut bytes = Vec::with_capacity(INVITE_CONTEXT.len() + 512);
         bytes.extend_from_slice(INVITE_CONTEXT);
@@ -156,6 +167,8 @@ mod tests {
                 signature: vec![1, 2, 3],
             }),
             member_role: None,
+            invitee: None,
+            invitee_name: None,
             signature: vec![9, 9, 9],
         }
     }
@@ -184,10 +197,23 @@ mod tests {
     }
 
     #[test]
+    fn an_invite_by_person_names_its_invitee_in_the_signed_bytes() {
+        let mut named = invite();
+        named.invitee = Some("cc".repeat(32));
+        named.invitee_name = Some("Juno".into());
+        let line = named.encode().expect("encode");
+        let back = Invite::decode(&line).expect("decode");
+        assert_eq!(back.invitee.as_deref(), Some("cc".repeat(32).as_str()));
+        assert_eq!(back.invitee_name.as_deref(), Some("Juno"));
+        assert_ne!(named.signed_bytes().expect("bytes"), invite().signed_bytes().expect("bytes"), "the invitee is covered");
+    }
+
+    #[test]
     fn a_realm_invite_carries_no_token_and_names_the_member_role() {
         let mut realm_invite = invite();
         realm_invite.token = None;
         realm_invite.member_role = Some(Role::Viewer);
+        realm_invite.invitee_name = None;
         let line = realm_invite.encode().expect("encode");
         let back = Invite::decode(&line).expect("decode");
         assert!(back.token.is_none(), "a realm invite needs no token");
