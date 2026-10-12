@@ -176,8 +176,10 @@ pub trait GrantVerifier: Send + Sync {
 /// this over the realm's UCAN verification; the engine never sees a token.
 pub trait MembershipVerifier: Send + Sync {
     /// Verifies that `ucan` is a live membership of this host's realm for
-    /// `node_id`.
-    fn verify_member(&self, ucan: &str, node_id: &str, now_ms: u64) -> Result<(), String>;
+    /// `node_id`, and returns when the membership ends (ms since the epoch):
+    /// a document grant issued on it must never outlive it, so a revoked or
+    /// lapsed membership takes the document access down with it.
+    fn verify_member(&self, ucan: &str, node_id: &str, now_ms: u64) -> Result<u64, String>;
     /// The role realm members are admitted with (the host's mapping).
     fn role(&self) -> Role;
 }
