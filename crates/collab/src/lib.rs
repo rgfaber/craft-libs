@@ -8,6 +8,7 @@
 //! [`DocAdapter`] (stable paragraph ids <-> text, snapshots), implemented
 //! once per app; wordcraft is first.
 
+pub mod contacts;
 pub mod grant;
 pub mod host;
 pub mod invite;
@@ -18,6 +19,7 @@ pub mod presence;
 pub mod text;
 pub mod transport;
 
+pub use contacts::{Contact, Contacts};
 pub use grant::{
     Access, Admission, GRANT_VERSION, Grant, GrantIssuer, GrantVerifier, MembershipVerifier, Revocation, Role, SignedGrant, SignedRevocation,
     mint_nonce,
