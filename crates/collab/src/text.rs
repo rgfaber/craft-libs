@@ -651,29 +651,17 @@ impl TextMerge {
     /// `objects` (byte offset in `target`, payload), in one update: a peer
     /// never sees an object without its payload. Text and objects are
     /// compared together, an object equal only to one with the same payload,
-    /// so the one contiguous change between them is removed and inserted and
-    /// nothing outside it is touched: an object a peer deleted meanwhile
+    /// and aligned token by token, so only what changed is removed and
+    /// inserted and every unchanged character keeps its item (a peer's
+    /// typing or deleting inside a newly commented selection stays inside): an object a peer deleted meanwhile
     /// stays deleted, and one inserted next to it is its own item. `None`
     /// when nothing changed.
     pub fn sync_objects(&mut self, para: &str, target: &str, objects: &[(u32, String)]) -> Option<Vec<u8>> {
         let current = self.text(para);
         let held = self.objects(para);
         let (a, b) = (tokens(&current, &held), tokens(target, objects));
-        let mut pre = 0;
-        while pre < a.len() && pre < b.len() && a[pre].1 == b[pre].1 && a[pre].2 == b[pre].2 {
-            pre += 1;
-        }
-        let mut suf = 0;
-        while suf < a.len() - pre
-            && suf < b.len() - pre
-            && a[a.len() - 1 - suf].1 == b[b.len() - 1 - suf].1
-            && a[a.len() - 1 - suf].2 == b[b.len() - 1 - suf].2
-        {
-            suf += 1;
-        }
-        let byte = |t: &[(usize, char, Option<&str>)], i: usize, whole: &str| t.get(i).map_or(whole.len(), |x| x.0);
-        let (from, to) = (byte(&a, pre, &current), byte(&a, a.len() - suf, &current));
-        if from == to && pre == b.len() - suf {
+        let hunks = token_hunks(&a, &b);
+        if hunks.is_empty() {
             return None;
         }
         self.end_capture();
@@ -681,29 +669,34 @@ impl TextMerge {
             Some(slot) => (self.edit_text(slot.body.as_deref()), slot.start()),
             None => (self.outside_text(para), 0),
         };
+        let byte = |t: &[(usize, char, Option<&str>)], i: usize, whole: &str| t.get(i).map_or(whole.len(), |x| x.0) as u32;
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
-        if to > from {
-            text.remove_range(&mut txn, base + from as u32, (to - from) as u32);
-        }
-        // The inserted middle, in runs: plain text, and each object with its payload.
-        let mut at = base + from as u32;
-        let mut run = String::new();
-        for &(_, c, payload) in &b[pre..b.len() - suf] {
-            match payload {
-                Some(p) => {
-                    if !run.is_empty() {
-                        text.insert_with_attributes(&mut txn, at, &run, plain_attrs());
-                        at += run.len() as u32;
-                        run.clear();
-                    }
-                    text.insert_with_attributes(&mut txn, at, &OBJECT_CHAR.to_string(), object_attrs(p));
-                    at += OBJECT_CHAR.len_utf8() as u32;
-                }
-                None => run.push(c),
+        // Back to front, so the offsets of the hunks still to apply hold; the tokens between
+        // hunks are never touched and keep their items.
+        for &(a0, a1, b0, b1) in hunks.iter().rev() {
+            let (from, to) = (byte(&a, a0, &current), byte(&a, a1, &current));
+            if to > from {
+                text.remove_range(&mut txn, base + from, to - from);
             }
-        }
-        if !run.is_empty() {
-            text.insert_with_attributes(&mut txn, at, &run, plain_attrs());
+            let mut at = base + from;
+            let mut run = String::new();
+            for &(_, c, payload) in &b[b0..b1] {
+                match payload {
+                    Some(p) => {
+                        if !run.is_empty() {
+                            text.insert_with_attributes(&mut txn, at, &run, plain_attrs());
+                            at += run.len() as u32;
+                            run.clear();
+                        }
+                        text.insert_with_attributes(&mut txn, at, &OBJECT_CHAR.to_string(), object_attrs(p));
+                        at += OBJECT_CHAR.len_utf8() as u32;
+                    }
+                    None => run.push(c),
+                }
+            }
+            if !run.is_empty() {
+                text.insert_with_attributes(&mut txn, at, &run, plain_attrs());
+            }
         }
         Some(txn.encode_update_v1())
     }
@@ -965,6 +958,66 @@ fn object_attrs(payload: &str) -> Attrs {
     let mut attrs = plain_attrs();
     attrs.insert(Arc::<str>::from(OBJ), Any::String(Arc::from(payload)));
     attrs
+}
+
+/// Above this many cells the middle of a change is one hunk rather than a
+/// token diff (a paragraph rewritten wholesale, far past any typed change).
+const DIFF_CELLS: usize = 4_000_000;
+
+/// The changes from token list `a` to `b`, as hunks `(a_from, a_to, b_from,
+/// b_to)` in order: tokens outside every hunk are equal and stay. The common
+/// head and tail are cut first; the middle is aligned by a longest common
+/// subsequence, so a change at each end of untouched text (an object either
+/// side of a selection) is two hunks, never one rewriting the text between.
+fn token_hunks(a: &[(usize, char, Option<&str>)], b: &[(usize, char, Option<&str>)]) -> Vec<(usize, usize, usize, usize)> {
+    let same = |x: &(usize, char, Option<&str>), y: &(usize, char, Option<&str>)| x.1 == y.1 && x.2 == y.2;
+    let mut pre = 0;
+    while pre < a.len() && pre < b.len() && same(&a[pre], &b[pre]) {
+        pre += 1;
+    }
+    let mut suf = 0;
+    while suf < a.len() - pre && suf < b.len() - pre && same(&a[a.len() - 1 - suf], &b[b.len() - 1 - suf]) {
+        suf += 1;
+    }
+    let (am, bm) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    if am.is_empty() && bm.is_empty() {
+        return Vec::new();
+    }
+    let (n, m) = (am.len(), bm.len());
+    if n == 0 || m == 0 || (n + 1) * (m + 1) > DIFF_CELLS {
+        return vec![(pre, pre + n, pre, pre + m)];
+    }
+    // lcs[i][j]: the longest common subsequence of am[i..] and bm[j..].
+    let w = m + 1;
+    let mut lcs = vec![0u32; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i * w + j] = if same(&am[i], &bm[j]) { lcs[(i + 1) * w + j + 1] + 1 } else { lcs[(i + 1) * w + j].max(lcs[i * w + j + 1]) };
+        }
+    }
+    let mut hunks = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    let mut open: Option<(usize, usize)> = None;
+    while i < n || j < m {
+        if i < n && j < m && same(&am[i], &bm[j]) {
+            if let Some((i0, j0)) = open.take() {
+                hunks.push((pre + i0, pre + i, pre + j0, pre + j));
+            }
+            i += 1;
+            j += 1;
+            continue;
+        }
+        open.get_or_insert((i, j));
+        if j < m && (i == n || lcs[i * w + j + 1] >= lcs[(i + 1) * w + j]) {
+            j += 1;
+        } else {
+            i += 1;
+        }
+    }
+    if let Some((i0, j0)) = open {
+        hunks.push((pre + i0, pre + n, pre + j0, pre + m));
+    }
+    hunks
 }
 
 /// A paragraph's text as tokens for [`TextMerge::sync_objects`]: each char,
@@ -1802,6 +1855,36 @@ mod object_tests {
         exchange(&mut a, &mut b, &ua, &ub);
         assert_eq!(shown(&a), shown(&b));
         assert_eq!(shown(&a), "ab and more");
+    }
+
+    #[test]
+    fn a_comment_around_a_selection_keeps_a_peers_concurrent_typing_inside() {
+        let (mut a, mut b) = pair("one two three");
+        let ua = a.sync_objects("p1", &format!("one {O}two{O} three"), &[obj(4, "s"), obj(10, "e")]).expect("A");
+        let ub = b.local_edit_exact("p1", 5, 0, "X").expect("B");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(a.text("p1"), b.text("p1"));
+        assert_eq!(shown(&a), "one [s]tXwo[e] three", "B's X stays inside the comment");
+    }
+
+    #[test]
+    fn a_comment_around_a_selection_keeps_a_peers_concurrent_delete_inside() {
+        let (mut a, mut b) = pair("one two three");
+        let ua = a.sync_objects("p1", &format!("one {O}two{O} three"), &[obj(4, "s"), obj(10, "e")]).expect("A");
+        let ub = b.local_edit_exact("p1", 5, 1, "").expect("B deletes the w");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(a.text("p1"), b.text("p1"));
+        assert_eq!(shown(&a), "one [s]to[e] three", "B's delete is not undone");
+    }
+
+    #[test]
+    fn a_bold_selection_keeps_its_bold_when_commented() {
+        let (mut a, mut b) = pair("one two three");
+        let u = a.local_bold("p1", 4, 3, true).expect("bold");
+        b.apply_doc_update(&u).expect("B");
+        let u = a.sync_objects("p1", &format!("one {O}two{O} three"), &[obj(4, "s"), obj(10, "e")]).expect("A");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(b.bold_spans("p1"), vec![(7, 10)], "the commented text kept its items and its bold");
     }
 
     #[test]
