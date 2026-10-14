@@ -104,6 +104,9 @@ pub struct TextMerge {
     /// What each named body and list read when the app last asked what
     /// changed.
     seen: HashMap<String, String>,
+    /// Inside [`TextMerge::begin_step`]: every write until
+    /// [`TextMerge::end_step`] is one undo step.
+    in_step: bool,
 }
 
 impl TextMerge {
@@ -130,7 +133,44 @@ impl TextMerge {
                 keys.extend(event.keys(txn).keys().map(|k| k.to_string()));
             }
         });
-        TextMerge { doc, body, origin, undo, outside: HashSet::new(), register, changed, _watch, scoped: HashSet::new(), seen: HashMap::new() }
+        TextMerge {
+            doc,
+            body,
+            origin,
+            undo,
+            outside: HashSet::new(),
+            register,
+            changed,
+            _watch,
+            scoped: HashSet::new(),
+            seen: HashMap::new(),
+            in_step: false,
+        }
+    }
+
+    /// Starts one undo step: every write this author makes until
+    /// [`TextMerge::end_step`] (text, register, bodies, lists) is taken back
+    /// by one [`TextMerge::undo_local`]. An app whose one command touches
+    /// several parts of the document (a shape's record, its text, its place
+    /// in a list) brackets the command with these. Without a step, each edit,
+    /// split, join, bold, clear and list change is its own undo step, and
+    /// register writes close together share one.
+    pub fn begin_step(&mut self) {
+        self.undo.reset();
+        self.in_step = true;
+    }
+
+    /// Ends the step [`TextMerge::begin_step`] began.
+    pub fn end_step(&mut self) {
+        self.undo.reset();
+        self.in_step = false;
+    }
+
+    /// Ends the current undo capture, unless a step is open.
+    fn end_capture(&mut self) {
+        if !self.in_step {
+            self.undo.reset();
+        }
     }
 
     /// Writes `value` under `key` as this author: the update to broadcast,
@@ -362,7 +402,7 @@ impl TextMerge {
         if len == 0 {
             return None;
         }
-        self.undo.reset();
+        self.end_capture();
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         text.remove_range(&mut txn, 0, len);
         Some(txn.encode_update_v1())
@@ -430,7 +470,7 @@ impl TextMerge {
         }
         let list = self.edit_list(name);
         let raw = self.raw_index(&list, &ids, index);
-        self.undo.reset();
+        self.end_capture();
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         list.insert(&mut txn, raw, id);
         Some(txn.encode_update_v1())
@@ -447,7 +487,7 @@ impl TextMerge {
             let txn = self.doc.transact();
             list.iter(&txn).enumerate().filter(|(_, v)| out_text(v).as_deref() == Some(id)).map(|(i, _)| i as u32).collect()
         };
-        self.undo.reset();
+        self.end_capture();
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         for i in at.into_iter().rev() {
             list.remove(&mut txn, i);
@@ -471,7 +511,7 @@ impl TextMerge {
         if from == to && copies == 1 {
             return None;
         }
-        self.undo.reset();
+        self.end_capture();
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         let raw = |txn: &yrs::TransactionMut| list.iter(txn).map(|v| out_text(&v).unwrap_or_default()).collect::<Vec<String>>();
         // Every copy after the first goes.
@@ -555,7 +595,7 @@ impl TextMerge {
             return None;
         }
         // Reset ends the previous capture window: one command is one undo step.
-        self.undo.reset();
+        self.end_capture();
         let (text, base, len) = match self.slot(para) {
             Some(slot) => (self.edit_text(slot.body.as_deref()), slot.start(), slot.text.len() as u32),
             None => {
@@ -604,7 +644,7 @@ impl TextMerge {
         if self.in_body(new_para) {
             return None;
         }
-        self.undo.reset();
+        self.end_capture();
         let at = at.min(slot.text.len() as u32);
         let body = self.edit_text(slot.body.as_deref());
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
@@ -624,7 +664,7 @@ impl TextMerge {
         if first.as_deref() == Some(para) {
             return None;
         }
-        self.undo.reset();
+        self.end_capture();
         let body = self.edit_text(slot.body.as_deref());
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         body.remove_range(&mut txn, slot.leader_at, LEADER.len() as u32);
@@ -711,7 +751,7 @@ impl TextMerge {
         if len == 0 {
             return None;
         }
-        self.undo.reset();
+        self.end_capture();
         let (text, base, total) = match self.slot(para) {
             Some(slot) => (self.edit_text(slot.body.as_deref()), slot.start(), slot.text.len() as u32),
             None => {
@@ -1462,6 +1502,31 @@ mod named_tests {
             l.len(&t)
         };
         assert_eq!(raw, 2);
+    }
+
+    #[test]
+    fn a_step_undoes_as_one_whatever_it_touched() {
+        let (mut a, mut b) = list_pair(&["s1"]);
+        a.begin_step();
+        let mut updates = vec![a.register_set("h/9", "{}").expect("record")];
+        updates.extend(a.seed_named_body("9", &[para("1", "")]));
+        updates.push(a.local_edit_exact("1", 0, 0, "new frame").expect("text"));
+        updates.push(a.list_insert("slides", 1, "s2").expect("list"));
+        a.end_step();
+        for u in &updates {
+            b.apply_doc_update(u).expect("B");
+        }
+        let later = a.local_edit_exact("1", 9, 0, "!").expect("a later edit");
+        b.apply_doc_update(&later).expect("B");
+        let undo = a.undo_local().expect("undo the later edit");
+        b.apply_doc_update(&undo).expect("B");
+        assert_eq!(b.text("1"), "new frame");
+        let undo = a.undo_local().expect("one undo for the whole step");
+        b.apply_doc_update(&undo).expect("B");
+        assert_eq!(b.register_get("h/9"), None);
+        assert_eq!(b.text("1"), "");
+        assert_eq!(b.list_ids("slides"), ids(&["s1"]));
+        assert!(a.undo_local().is_none());
     }
 
     #[test]
