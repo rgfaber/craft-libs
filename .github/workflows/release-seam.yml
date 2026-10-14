@@ -19,13 +19,13 @@ jobs:
             echo "::error::tag $TAG_VERSION is not the crate version $PACKAGE_VERSION"
             exit 1
           fi
-      - run: cargo test -p macula-craft-seam --locked
-      - run: cargo clippy -p macula-craft-seam --all-targets --locked -- -D warnings
+      - run: cargo test --manifest-path crates/collab/Cargo.toml --locked
+      - run: cargo clippy --manifest-path crates/collab/Cargo.toml --all-targets --locked -- -D warnings
       - run: cargo fmt --all -- --check
-      - run: cargo publish -p macula-craft-seam --dry-run --locked
+      - run: cargo publish --manifest-path crates/collab/Cargo.toml --dry-run --locked
       # CRATES_IO_TOKEN: a plain crates.io API token; Trusted Publishing can
       # replace it after the first release exists.
       - name: Publish
-        run: cargo publish -p macula-craft-seam --locked
+        run: cargo publish --manifest-path crates/collab/Cargo.toml --locked
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}

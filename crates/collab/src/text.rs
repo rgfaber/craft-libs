@@ -14,6 +14,15 @@
 //! value; when two authors write a key at once, every replica keeps the same
 //! one. Register writes travel and undo exactly like text edits.
 //!
+//! Named bodies (one per text frame of a slide, say) behave exactly like
+//! the body, each under a root of its own. Paragraph ids are unique across
+//! the document, so the paragraph edits find the body that holds one.
+//!
+//! Ordered id lists (slide order, z-order) hold opaque ids. A move is a
+//! CRDT move, so two authors moving one id at once leave it in one place;
+//! two authors inserting one id at once leave two copies in the CRDT, and
+//! every replica reads the first. Lists undo per author like the rest.
+//!
 //! Offsets are bytes (yrs's default), which matches the apps' byte offsets.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -23,8 +32,8 @@ use yrs::types::Attrs;
 use yrs::undo::{Options as UndoOptions, UndoManager};
 use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, Assoc, Doc, GetString, IndexedSequence, Map, MapRef, Observable, Options, Origin, Out, ReadTxn, StickyIndex, Subscription, Text, TextRef,
-    Transact, Update,
+    Any, Array, ArrayRef, Assoc, Doc, GetString, IndexedSequence, Map, MapRef, Observable, Options, Origin, Out, ReadTxn, StickyIndex, Subscription,
+    Text, TextRef, Transact, Update,
 };
 
 /// The body text's root name (paragraph ids are numeric strings, so it never
@@ -39,6 +48,11 @@ const PROPS: &str = "props";
 const LEADER: &str = "\n";
 /// The keyed register's root name.
 const REGISTER: &str = "craft-register";
+/// A named body's root name is this prefix and its name (an app's text
+/// frame, say); the unnamed body keeps [`BODY`].
+const NAMED_BODY: &str = "craft-body:";
+/// An ordered id list's root name is this prefix and its name.
+const LIST: &str = "craft-list:";
 
 /// One paragraph of the body, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +68,8 @@ pub struct BodyParagraph {
 /// Where a paragraph sits in the body: its leader, then its text.
 #[derive(Clone, Debug)]
 struct Slot {
+    /// The named body holding it, `None` for the unnamed body.
+    body: Option<String>,
     para: String,
     leader_at: u32,
     text: String,
@@ -83,6 +99,11 @@ pub struct TextMerge {
     /// remote, undone or loaded, lands here.
     changed: Arc<Mutex<BTreeSet<String>>>,
     _watch: Subscription,
+    /// Named bodies and lists this author has touched, so under undo.
+    scoped: HashSet<String>,
+    /// What each named body and list read when the app last asked what
+    /// changed.
+    seen: HashMap<String, String>,
 }
 
 impl TextMerge {
@@ -109,7 +130,7 @@ impl TextMerge {
                 keys.extend(event.keys(txn).keys().map(|k| k.to_string()));
             }
         });
-        TextMerge { doc, body, origin, undo, outside: HashSet::new(), register, changed, _watch }
+        TextMerge { doc, body, origin, undo, outside: HashSet::new(), register, changed, _watch, scoped: HashSet::new(), seen: HashMap::new() }
     }
 
     /// Writes `value` under `key` as this author: the update to broadcast,
@@ -180,10 +201,56 @@ impl TextMerge {
         text
     }
 
+    /// The unnamed body's paragraphs.
     fn slots<T: ReadTxn>(&self, txn: &T) -> Vec<Slot> {
+        slots_in(&self.body, None, txn)
+    }
+
+    /// The names of the named bodies (or lists, by prefix) this document holds.
+    fn root_names(&self, prefix: &str) -> Vec<String> {
+        let txn = self.doc.transact();
+        let mut names: Vec<String> = txn.root_refs().filter_map(|(name, _)| name.strip_prefix(prefix).map(str::to_string)).collect();
+        names.sort();
+        names
+    }
+
+    /// A named body's text (made when first named; never under a transaction).
+    fn named_ref(&self, name: &str) -> TextRef {
+        self.doc.get_or_insert_text(format!("{NAMED_BODY}{name}"))
+    }
+
+    /// The text a slot's paragraph lives in.
+    fn text_of(&self, body: Option<&str>) -> TextRef {
+        match body {
+            None => self.body(),
+            Some(name) => self.named_ref(name),
+        }
+    }
+
+    /// Puts a named body or list under this author's undo the first time
+    /// it is touched locally.
+    fn scope<T: AsRef<yrs::branch::Branch>>(&mut self, root: &str, r: &T) {
+        if self.scoped.insert(root.to_string()) {
+            self.undo.expand_scope(r);
+        }
+    }
+
+    /// The text a local edit to `slot` goes to, under undo.
+    fn edit_text(&mut self, body: Option<&str>) -> TextRef {
+        let text = self.text_of(body);
+        if let Some(name) = body {
+            self.scope(&format!("{NAMED_BODY}{name}"), &text);
+        }
+        text
+    }
+}
+
+/// A body's paragraphs, in order.
+fn slots_in<T: ReadTxn>(text: &TextRef, body: Option<&str>, txn: &T) -> Vec<Slot> {
+    {
         let mut slots: Vec<Slot> = Vec::new();
         let mut pos = 0u32;
-        for chunk in self.body().diff(txn, |_| ()) {
+        for chunk in text.diff(txn, |_| ()) {
             let Some(s) = out_text(&chunk.insert) else { continue };
             let attrs = chunk.attributes.as_deref();
             match attrs.and_then(|a| a.get(PID)).and_then(any_string) {
@@ -192,7 +259,13 @@ impl TextMerge {
                     // Each leader is its own paragraph (adjacent leaders
                     // never share a chunk: their ids differ).
                     for (i, _) in s.char_indices() {
-                        slots.push(Slot { para: pid.clone(), leader_at: pos + i as u32, text: String::new(), props: props.clone() });
+                        slots.push(Slot {
+                            body: body.map(str::to_string),
+                            para: pid.clone(),
+                            leader_at: pos + i as u32,
+                            text: String::new(),
+                            props: props.clone(),
+                        });
                     }
                 }
                 None => {
@@ -207,13 +280,23 @@ impl TextMerge {
         }
         slots
     }
+}
 
+impl TextMerge {
+    /// The slot of a paragraph in whichever body holds it: paragraph ids are
+    /// unique across the document.
     fn slot(&self, para: &str) -> Option<Slot> {
-        let txn = self.doc.transact();
-        self.slots(&txn).into_iter().find(|s| s.para == para)
+        if let Some(slot) = self.slots(&self.doc.transact()).into_iter().find(|s| s.para == para) {
+            return Some(slot);
+        }
+        self.root_names(NAMED_BODY).into_iter().find_map(|name| {
+            let text = self.named_ref(&name);
+            let txn = self.doc.transact();
+            slots_in(&text, Some(&name), &txn).into_iter().find(|s| s.para == para)
+        })
     }
 
-    /// Whether the body holds this paragraph.
+    /// Whether a body (the unnamed one or a named one) holds this paragraph.
     pub fn in_body(&self, para: &str) -> bool {
         self.slot(para).is_some()
     }
@@ -231,18 +314,192 @@ impl TextMerge {
         if !self.body_paragraphs().is_empty() || paras.is_empty() {
             return None;
         }
-        let body = self.body();
-        let mut txn = self.doc.transact_mut();
-        let mut at = 0u32;
-        for p in paras {
-            body.insert_with_attributes(&mut txn, at, LEADER, leader_attrs(&p.para, p.props.as_deref()));
-            at += LEADER.len() as u32;
-            if !p.text.is_empty() {
-                body.insert_with_attributes(&mut txn, at, &p.text, plain_attrs());
-                at += p.text.len() as u32;
+        Some(seed_into(&self.doc, &self.body, paras))
+    }
+
+    /// The named bodies this document holds, sorted (a peer's new body shows
+    /// once its first update is applied).
+    pub fn body_names(&self) -> Vec<String> {
+        self.root_names(NAMED_BODY)
+    }
+
+    /// A named body's paragraphs, in order; empty for a body never written.
+    /// An empty body is not a deleted one: whether its frame exists is the
+    /// app's to say (a list or the register), since a peer still typing into
+    /// a body another author cleared keeps that typing.
+    pub fn named_body_paragraphs(&self, name: &str) -> Vec<BodyParagraph> {
+        if !self.body_names().iter().any(|n| n == name) {
+            return Vec::new();
+        }
+        let text = self.named_ref(name);
+        let txn = self.doc.transact();
+        slots_in(&text, Some(name), &txn).into_iter().map(|s| BodyParagraph { para: s.para, text: s.text, props: s.props }).collect()
+    }
+
+    /// Seeds an empty named body (a frame that existed before sharing, or
+    /// one this author just made) with its paragraphs. Not undoable, as
+    /// [`TextMerge::seed_body`]. The update to broadcast, `None` when the body
+    /// already has content or `paras` is empty.
+    pub fn seed_named_body(&mut self, name: &str, paras: &[BodyParagraph]) -> Option<Vec<u8>> {
+        if paras.is_empty() || !self.named_body_paragraphs(name).is_empty() {
+            return None;
+        }
+        let text = self.edit_text(Some(name));
+        Some(seed_into(&self.doc, &text, paras))
+    }
+
+    /// Empties a named body as this author (its frame was deleted): the
+    /// update to broadcast, `None` when it was already empty. Undoable. A
+    /// peer typing into it at the same moment keeps those characters in the
+    /// CRDT, but with no paragraph to hold them the body reads empty on every
+    /// replica; an undo of the clear brings the paragraphs back around them.
+    pub fn clear_named_body(&mut self, name: &str) -> Option<Vec<u8>> {
+        if !self.body_names().iter().any(|n| n == name) {
+            return None;
+        }
+        let text = self.edit_text(Some(name));
+        let len = text.len(&self.doc.transact());
+        if len == 0 {
+            return None;
+        }
+        self.undo.reset();
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        text.remove_range(&mut txn, 0, len);
+        Some(txn.encode_update_v1())
+    }
+
+    /// The named bodies whose paragraphs changed since the last call, sorted:
+    /// local edits, a peer's, an undo or a snapshot.
+    pub fn bodies_changed(&mut self) -> Vec<String> {
+        let now: Vec<(String, String)> =
+            self.body_names().into_iter().map(|name| (format!("{NAMED_BODY}{name}"), format!("{:?}", self.named_body_paragraphs(&name)))).collect();
+        self.changed_since(now, NAMED_BODY)
+    }
+
+    /// The roots under `prefix` whose reading differs from the last one seen.
+    fn changed_since(&mut self, now: Vec<(String, String)>, prefix: &str) -> Vec<String> {
+        let mut changed = Vec::new();
+        for (root, reading) in now {
+            if self.seen.get(&root) != Some(&reading) {
+                changed.push(root.trim_start_matches(prefix).to_string());
+                self.seen.insert(root, reading);
             }
         }
+        changed
+    }
+
+    /// The ids of a list, in order. An id that two authors inserted at once
+    /// is there twice in the CRDT; every replica reads its first occurrence
+    /// only.
+    pub fn list_ids(&self, name: &str) -> Vec<String> {
+        if !self.root_names(LIST).iter().any(|n| n == name) {
+            return Vec::new();
+        }
+        let list = self.list_ref(name);
+        let txn = self.doc.transact();
+        let mut seen = HashSet::new();
+        list.iter(&txn).filter_map(|v| out_text(&v)).filter(|id| seen.insert(id.clone())).collect()
+    }
+
+    /// The lists this document holds, sorted.
+    pub fn list_names(&self) -> Vec<String> {
+        self.root_names(LIST)
+    }
+
+    /// Seeds an empty list with what the document already holds (no one's
+    /// undo takes it back). The update to broadcast, `None` when the list
+    /// has ids already or `ids` is empty.
+    pub fn list_seed(&mut self, name: &str, ids: &[String]) -> Option<Vec<u8>> {
+        if ids.is_empty() || !self.list_ids(name).is_empty() {
+            return None;
+        }
+        let list = self.edit_list(name);
+        let mut txn = self.doc.transact_mut();
+        for (i, id) in ids.iter().enumerate() {
+            list.insert(&mut txn, i as u32, id.as_str());
+        }
         Some(txn.encode_update_v1())
+    }
+
+    /// Inserts `id` at `index` (clamped) as this author: the update, `None`
+    /// when this replica already lists it.
+    pub fn list_insert(&mut self, name: &str, index: u32, id: &str) -> Option<Vec<u8>> {
+        let ids = self.list_ids(name);
+        if ids.iter().any(|i| i == id) {
+            return None;
+        }
+        let list = self.edit_list(name);
+        let raw = self.raw_index(&list, &ids, index);
+        self.undo.reset();
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        list.insert(&mut txn, raw, id);
+        Some(txn.encode_update_v1())
+    }
+
+    /// Removes `id` (every copy of it) as this author: the update, `None`
+    /// when it is not listed.
+    pub fn list_remove(&mut self, name: &str, id: &str) -> Option<Vec<u8>> {
+        if !self.list_ids(name).iter().any(|i| i == id) {
+            return None;
+        }
+        let list = self.edit_list(name);
+        let at: Vec<u32> = {
+            let txn = self.doc.transact();
+            list.iter(&txn).enumerate().filter(|(_, v)| out_text(v).as_deref() == Some(id)).map(|(i, _)| i as u32).collect()
+        };
+        self.undo.reset();
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        for i in at.into_iter().rev() {
+            list.remove(&mut txn, i);
+        }
+        Some(txn.encode_update_v1())
+    }
+
+    /// Moves `id` so it reads at `to` (clamped) as this author: the update,
+    /// `None` when it is not listed or already there.
+    pub fn list_move(&mut self, name: &str, id: &str, to: u32) -> Option<Vec<u8>> {
+        let ids = self.list_ids(name);
+        let from = ids.iter().position(|i| i == id)? as u32;
+        let to = to.min(ids.len() as u32 - 1);
+        if from == to {
+            return None;
+        }
+        let list = self.edit_list(name);
+        let source = self.raw_index(&list, &ids, from);
+        // move_to places the item before what stands at the target now, so
+        // a move down targets the slot after the destination.
+        let target = self.raw_index(&list, &ids, if to > from { to + 1 } else { to });
+        self.undo.reset();
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        list.move_to(&mut txn, source, target);
+        Some(txn.encode_update_v1())
+    }
+
+    /// The lists whose ids changed since the last call, sorted.
+    pub fn lists_changed(&mut self) -> Vec<String> {
+        let now: Vec<(String, String)> =
+            self.list_names().into_iter().map(|name| (format!("{LIST}{name}"), self.list_ids(&name).join("\n"))).collect();
+        self.changed_since(now, LIST)
+    }
+
+    fn list_ref(&self, name: &str) -> ArrayRef {
+        self.doc.get_or_insert_array(format!("{LIST}{name}"))
+    }
+
+    fn edit_list(&mut self, name: &str) -> ArrayRef {
+        let list = self.list_ref(name);
+        self.scope(&format!("{LIST}{name}"), &list);
+        list
+    }
+
+    /// The raw array index of the `index`th id as read (the first copy of
+    /// each), or the array's end past the last.
+    fn raw_index(&self, list: &ArrayRef, read: &[String], index: u32) -> u32 {
+        let txn = self.doc.transact();
+        let Some(want) = read.get(index as usize) else {
+            return list.len(&txn);
+        };
+        list.iter(&txn).position(|v| out_text(&v).as_deref() == Some(want.as_str())).map_or(list.len(&txn), |i| i as u32)
     }
 
     /// The merged text of a paragraph.
@@ -278,7 +535,7 @@ impl TextMerge {
         // Reset ends the previous capture window: one command is one undo step.
         self.undo.reset();
         let (text, base, len) = match self.slot(para) {
-            Some(slot) => (self.body(), slot.start(), slot.text.len() as u32),
+            Some(slot) => (self.edit_text(slot.body.as_deref()), slot.start(), slot.text.len() as u32),
             None => {
                 let text = self.outside_text(para);
                 let len = text.get_string(&self.doc.transact()).len() as u32;
@@ -327,7 +584,7 @@ impl TextMerge {
         }
         self.undo.reset();
         let at = at.min(slot.text.len() as u32);
-        let body = self.body();
+        let body = self.edit_text(slot.body.as_deref());
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         body.insert_with_attributes(&mut txn, slot.start() + at, LEADER, leader_attrs(new_para, props));
         Some(txn.encode_update_v1())
@@ -336,16 +593,17 @@ impl TextMerge {
     /// Joins body paragraph `para` onto the paragraph before it (Backspace
     /// at its start, Delete at the end of the one before): its leader goes,
     /// so its text — including anything typed into it concurrently — joins
-    /// the previous paragraph. `None` for the first paragraph or an unknown one.
+    /// the previous paragraph. `None` for the first paragraph of its body or
+    /// an unknown one.
     pub fn local_join(&mut self, para: &str) -> Option<Vec<u8>> {
-        let slots = self.body_paragraphs();
-        let first = slots.first().map(|s| s.para.clone());
+        let slot = self.slot(para)?;
+        let text = self.text_of(slot.body.as_deref());
+        let first = slots_in(&text, slot.body.as_deref(), &self.doc.transact()).first().map(|s| s.para.clone());
         if first.as_deref() == Some(para) {
             return None;
         }
-        let slot = self.slot(para)?;
         self.undo.reset();
-        let body = self.body();
+        let body = self.edit_text(slot.body.as_deref());
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
         body.remove_range(&mut txn, slot.leader_at, LEADER.len() as u32);
         Some(txn.encode_update_v1())
@@ -374,18 +632,28 @@ impl TextMerge {
     /// outside the body come back unchanged.
     pub fn apply_update_carrying(&mut self, update: &[u8], positions: &[(String, u32)]) -> Result<Vec<(String, u32)>, String> {
         let update = Update::decode_v1(update).map_err(|e| format!("{e:?}"))?;
-        let body = self.body();
+        // Each position's slot and the body text it lives in, resolved
+        // before any transaction opens (naming a body takes one).
+        let located: Vec<Option<(Slot, TextRef)>> = positions
+            .iter()
+            .map(|(para, _)| {
+                self.slot(para).map(|slot| {
+                    let text = self.text_of(slot.body.as_deref());
+                    (slot, text)
+                })
+            })
+            .collect();
         let stickies: Vec<Option<StickyIndex>> = {
-            let slots = self.slots(&self.doc.transact());
             let mut txn = self.doc.transact_mut();
             positions
                 .iter()
-                .map(|(para, off)| {
-                    let slot = slots.iter().find(|s| &s.para == para)?;
+                .zip(&located)
+                .map(|((_, off), found)| {
+                    let (slot, text) = found.as_ref()?;
                     let at = slot.start() + (*off).min(slot.text.len() as u32);
                     // Before: the position belongs to the character before it
                     // (the leader, at a paragraph's start).
-                    body.sticky_index(&mut txn, at, Assoc::Before)
+                    text.sticky_index(&mut txn, at, Assoc::Before)
                 })
                 .collect()
         };
@@ -394,14 +662,16 @@ impl TextMerge {
             txn.apply_update(update).map_err(|e| format!("{e:?}"))?;
         }
         let txn = self.doc.transact();
-        let slots = self.slots(&txn);
+        let mut slots_of: HashMap<Option<String>, Vec<Slot>> = HashMap::new();
         Ok(positions
             .iter()
             .zip(stickies)
-            .map(|((para, off), sticky)| {
-                let Some(index) = sticky.and_then(|s| s.get_offset(&txn)).map(|o| o.index) else {
+            .zip(&located)
+            .map(|(((para, off), sticky), found)| {
+                let (Some(index), Some((slot, text))) = (sticky.and_then(|s| s.get_offset(&txn)).map(|o| o.index), found) else {
                     return (para.clone(), *off);
                 };
+                let slots = slots_of.entry(slot.body.clone()).or_insert_with(|| slots_in(text, slot.body.as_deref(), &txn));
                 // The paragraph whose leader is at or before the index.
                 match slots.iter().rev().find(|s| s.leader_at < index || (s.leader_at == index && index == 0)) {
                     Some(slot) => (slot.para.clone(), index.saturating_sub(slot.start()).min(slot.text.len() as u32)),
@@ -421,7 +691,7 @@ impl TextMerge {
         }
         self.undo.reset();
         let (text, base, total) = match self.slot(para) {
-            Some(slot) => (self.body(), slot.start(), slot.text.len() as u32),
+            Some(slot) => (self.edit_text(slot.body.as_deref()), slot.start(), slot.text.len() as u32),
             None => {
                 let text = self.outside_text(para);
                 let len = text.get_string(&self.doc.transact()).len() as u32;
@@ -443,13 +713,14 @@ impl TextMerge {
     /// The bold spans (byte ranges within the paragraph) the CRDT holds for
     /// `para`, in order: the item-anchored truth every replica derives runs from.
     pub fn bold_spans(&self, para: &str) -> Vec<(u32, u32)> {
-        let outside = (!self.in_body(para)).then(|| self.doc.get_or_insert_text(para.to_string()));
-        let txn = self.doc.transact();
-        let (chunks, range) = match (&outside, self.slots(&txn).into_iter().find(|s| s.para == para)) {
-            (None, Some(slot)) => (self.body().diff(&txn, |_| ()), Some((slot.start(), slot.start() + slot.text.len() as u32))),
-            (Some(text), _) => (text.diff(&txn, |_| ()), None),
-            (None, None) => return Vec::new(),
+        let slot = self.slot(para);
+        let text = match &slot {
+            Some(slot) => self.text_of(slot.body.as_deref()),
+            None => self.doc.get_or_insert_text(para.to_string()),
         };
+        let txn = self.doc.transact();
+        let chunks = text.diff(&txn, |_| ());
+        let range = slot.map(|slot| (slot.start(), slot.start() + slot.text.len() as u32));
         let (from, to) = range.unwrap_or((0, u32::MAX));
         let mut spans = Vec::new();
         let mut pos = 0u32;
@@ -489,6 +760,21 @@ impl TextMerge {
         let txn = self.doc.transact();
         Some(txn.encode_state_as_update_v1(&before))
     }
+}
+
+/// Writes `paras` into an empty body, with no author.
+fn seed_into(doc: &Doc, body: &TextRef, paras: &[BodyParagraph]) -> Vec<u8> {
+    let mut txn = doc.transact_mut();
+    let mut at = 0u32;
+    for p in paras {
+        body.insert_with_attributes(&mut txn, at, LEADER, leader_attrs(&p.para, p.props.as_deref()));
+        at += LEADER.len() as u32;
+        if !p.text.is_empty() {
+            body.insert_with_attributes(&mut txn, at, &p.text, plain_attrs());
+            at += p.text.len() as u32;
+        }
+    }
+    txn.encode_update_v1()
 }
 
 /// The leader's attributes: the paragraph id, and its properties when given.
@@ -828,5 +1114,327 @@ mod tests {
         joiner.apply_doc_update(&a.full_update()).expect("seed");
         assert_eq!(joiner.register_entries(), vec![("sheet/1".to_string(), "Sheet1".to_string())]);
         assert_eq!(joiner.register_changed(), vec!["sheet/1".to_string()], "the joiner learns which keys to read");
+    }
+}
+
+/// Named bodies and ordered lists: the 0.2 Enter/join races run against a
+/// named body, and the list's concurrent inserts, moves and removes.
+#[cfg(test)]
+mod named_tests {
+    use super::*;
+
+    const FRAME: &str = "4294967297";
+
+    fn para(id: &str, text: &str) -> BodyParagraph {
+        BodyParagraph { para: id.into(), text: text.into(), props: None }
+    }
+
+    /// Two authors sharing a named body: A seeds it, B applies the seed.
+    fn pair(paras: &[BodyParagraph]) -> (TextMerge, TextMerge) {
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
+        let seed = a.seed_named_body(FRAME, paras).expect("seed");
+        b.apply_doc_update(&seed).expect("B seeds");
+        (a, b)
+    }
+
+    fn exchange(a: &mut TextMerge, b: &mut TextMerge, ua: &[u8], ub: &[u8]) {
+        a.apply_doc_update(ub).expect("A applies");
+        b.apply_doc_update(ua).expect("B applies");
+    }
+
+    fn texts(m: &TextMerge) -> Vec<(String, String)> {
+        m.named_body_paragraphs(FRAME).into_iter().map(|p| (p.para, p.text)).collect()
+    }
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_named_body_reads_back_and_is_listed() {
+        let (a, b) = pair(&[para("1", "Title"), para("2", "Point")]);
+        assert_eq!(texts(&b), vec![("1".to_string(), "Title".to_string()), ("2".to_string(), "Point".to_string())]);
+        assert_eq!(b.body_names(), vec![FRAME.to_string()]);
+        assert!(a.body_paragraphs().is_empty(), "the unnamed body is untouched");
+        assert!(b.in_body("2"));
+    }
+
+    #[test]
+    fn a_split_in_a_named_body_travels_and_typing_follows_it() {
+        let (mut a, mut b) = pair(&[para("1", "Field notes. Hana writes.")]);
+        let u = a.local_split("1", 13, "9", None).expect("Enter");
+        b.apply_doc_update(&u).expect("B applies the split");
+        assert_eq!(texts(&b), vec![("1".to_string(), "Field notes. ".to_string()), ("9".to_string(), "Hana writes.".to_string())]);
+        let u = a.local_edit_exact("9", 12, 0, " More.").expect("typing in the new paragraph");
+        b.apply_doc_update(&u).expect("B applies");
+        assert_eq!(b.text("9"), "Hana writes. More.");
+        assert_eq!(texts(&a), texts(&b));
+    }
+
+    #[test]
+    fn two_concurrent_enters_in_a_named_body_make_three_paragraphs_and_no_duplicate() {
+        let (mut a, mut b) = pair(&[para("1", "aaaa bbbb cccc")]);
+        let ua = a.local_split("1", 5, "10", None).expect("A presses Enter");
+        let ub = b.local_split("1", 10, "20", None).expect("B presses Enter");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(texts(&a), texts(&b));
+        assert_eq!(texts(&a).into_iter().map(|(_, t)| t).collect::<String>(), "aaaa bbbb cccc");
+        assert_eq!(texts(&a).len(), 3);
+    }
+
+    #[test]
+    fn two_concurrent_enters_at_one_spot_in_a_named_body_make_an_empty_paragraph() {
+        let (mut a, mut b) = pair(&[para("1", "left right")]);
+        let ua = a.local_split("1", 5, "10", None).expect("A");
+        let ub = b.local_split("1", 5, "20", None).expect("B");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(texts(&a), texts(&b));
+        assert_eq!(texts(&a).into_iter().map(|(_, t)| t).collect::<String>(), "left right");
+        assert_eq!(texts(&a).len(), 3);
+    }
+
+    #[test]
+    fn a_join_in_a_named_body_keeps_text_typed_concurrently() {
+        let (mut a, mut b) = pair(&[para("1", "one"), para("2", "two")]);
+        let ua = a.local_join("2").expect("A joins");
+        let ub = b.local_edit_exact("2", 3, 0, " and three").expect("B types into 2");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(texts(&a), texts(&b));
+        assert_eq!(texts(&a), vec![("1".to_string(), "onetwo and three".to_string())]);
+    }
+
+    #[test]
+    fn the_first_paragraph_of_a_named_body_cannot_be_joined_away() {
+        let (mut a, _) = pair(&[para("1", "one"), para("2", "two")]);
+        assert!(a.local_join("1").is_none());
+    }
+
+    #[test]
+    fn a_caret_in_a_named_body_is_carried_across_a_remote_split_and_join() {
+        let (mut a, mut b) = pair(&[para("1", "Field notes. Hana writes."), para("2", "Ines")]);
+        let u = a.local_split("1", 13, "9", None).expect("split");
+        let carried = b.apply_update_carrying(&u, &[("1".into(), 25), ("1".into(), 5)]).expect("apply");
+        assert_eq!(carried, vec![("9".to_string(), 12), ("1".to_string(), 5)]);
+        let u = a.local_join("2").expect("join");
+        let carried = b.apply_update_carrying(&u, &[("2".into(), 2)]).expect("apply");
+        assert_eq!(carried, vec![("9".to_string(), 12 + 2)]);
+        assert_eq!(texts(&a), texts(&b));
+    }
+
+    #[test]
+    fn bold_in_a_named_body_is_anchored_to_its_text() {
+        let (mut a, mut b) = pair(&[para("p1", "Bravo. Alpha. ")]);
+        let ub = b.local_bold("p1", 7, 6, true).expect("bold");
+        let ua = a.local_edit_exact("p1", 10, 0, "ONE ").expect("insert");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(a.text("p1"), b.text("p1"));
+        assert_eq!(a.bold_spans("p1"), b.bold_spans("p1"));
+        assert!(!a.bold_spans("p1").is_empty());
+    }
+
+    #[test]
+    fn undo_in_a_named_body_is_per_author_and_latest_first() {
+        let (mut a, mut b) = pair(&[para("1", "one"), para("2", "two")]);
+        let u1 = a.local_edit_exact("2", 3, 0, "!").expect("typing in 2");
+        let u2 = a.local_split("1", 1, "9", None).expect("Enter in 1");
+        let ub = b.local_edit_exact("1", 0, 0, ">").expect("B types");
+        exchange(&mut a, &mut b, &u1, &ub);
+        b.apply_doc_update(&u2).expect("B");
+        let undo = a.undo_local().expect("undo the split");
+        b.apply_doc_update(&undo).expect("B applies");
+        assert_eq!(texts(&a), vec![(String::from("1"), String::from(">one")), (String::from("2"), String::from("two!"))]);
+        let undo = a.undo_local().expect("then the typing");
+        b.apply_doc_update(&undo).expect("B applies");
+        assert_eq!(texts(&b), vec![(String::from("1"), String::from(">one")), (String::from("2"), String::from("two"))], "B's typing stays");
+        assert_eq!(texts(&a), texts(&b));
+    }
+
+    #[test]
+    fn undo_never_takes_back_a_peers_edit_in_a_body_the_peer_made() {
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
+        let seed = b.seed_named_body("peer", &[para("7", "")]).expect("B makes a frame");
+        let typed = b.local_edit_exact("7", 0, 0, "B wrote this").expect("B types");
+        a.apply_doc_update(&seed).expect("A");
+        a.apply_doc_update(&typed).expect("A");
+        assert!(a.undo_local().is_none(), "A has nothing of its own to undo");
+        let mine = a.seed_named_body(FRAME, &[para("1", "")]).expect("A's frame");
+        let ua = a.local_edit_exact("1", 0, 0, "A wrote this").expect("A types");
+        b.apply_doc_update(&mine).expect("B");
+        b.apply_doc_update(&ua).expect("B");
+        let undo = a.undo_local().expect("A undoes its own typing");
+        b.apply_doc_update(&undo).expect("B");
+        assert_eq!(a.text("7"), "B wrote this");
+        assert_eq!(b.text("7"), "B wrote this");
+        assert_eq!(b.text("1"), "");
+        assert!(a.undo_local().is_none(), "the seed is no one's to undo");
+    }
+
+    #[test]
+    fn a_cleared_body_reads_empty_even_when_a_peer_typed_meanwhile() {
+        let (mut a, mut b) = pair(&[para("1", "gone")]);
+        let ua = a.clear_named_body(FRAME).expect("A deletes the frame");
+        let ub = b.local_edit_exact("1", 4, 0, " but kept").expect("B still typing");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(texts(&a), texts(&b));
+        assert!(texts(&a).is_empty(), "the typing has no paragraph left to read in: {:?}", texts(&a));
+        let raw = |m: &TextMerge| {
+            let t = m.named_ref(FRAME);
+            let txn = m.doc.transact();
+            t.get_string(&txn)
+        };
+        assert_eq!(raw(&a), " but kept", "but the CRDT keeps it, the same on both");
+        assert_eq!(raw(&a), raw(&b));
+        let undo = a.undo_local().expect("A undoes the clear");
+        b.apply_doc_update(&undo).expect("B");
+        assert_eq!(texts(&a), vec![("1".to_string(), "gone but kept".to_string())], "the undo brings the paragraph back around B's typing");
+        assert_eq!(texts(&a), texts(&b));
+        assert_eq!(a.body_names(), vec![FRAME.to_string()], "the body is still named: whether the frame exists is the app's");
+    }
+
+    #[test]
+    fn bodies_changed_reports_each_body_once_per_change() {
+        let (mut a, mut b) = pair(&[para("1", "x")]);
+        assert_eq!(b.bodies_changed(), vec![FRAME.to_string()]);
+        assert!(b.bodies_changed().is_empty());
+        let u = a.local_edit_exact("1", 1, 0, "y").expect("edit");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(b.bodies_changed(), vec![FRAME.to_string()]);
+    }
+
+    #[test]
+    fn bodies_are_independent() {
+        let (mut a, mut b) = pair(&[para("1", "frame one")]);
+        let u = a.seed_named_body("other", &[para("2", "frame two")]).expect("seed");
+        b.apply_doc_update(&u).expect("B");
+        let u = b.local_edit_exact("2", 0, 0, ">").expect("B types in two");
+        a.apply_doc_update(&u).expect("A");
+        assert_eq!(a.text("1"), "frame one");
+        assert_eq!(a.text("2"), ">frame two");
+        assert_eq!(a.body_names(), vec![FRAME.to_string(), "other".to_string()]);
+    }
+
+    fn list_pair(seed: &[&str]) -> (TextMerge, TextMerge) {
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
+        let u = a.list_seed("slides", &ids(seed)).expect("seed");
+        b.apply_doc_update(&u).expect("B");
+        (a, b)
+    }
+
+    #[test]
+    fn a_list_reads_back_inserts_and_removes() {
+        let (mut a, mut b) = list_pair(&["s1", "s2", "s3"]);
+        assert_eq!(b.list_ids("slides"), ids(&["s1", "s2", "s3"]));
+        let u = a.list_insert("slides", 1, "s9").expect("insert");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(b.list_ids("slides"), ids(&["s1", "s9", "s2", "s3"]));
+        assert!(a.list_insert("slides", 0, "s9").is_none(), "already listed");
+        let u = b.list_remove("slides", "s2").expect("remove");
+        a.apply_doc_update(&u).expect("A");
+        assert_eq!(a.list_ids("slides"), ids(&["s1", "s9", "s3"]));
+        assert_eq!(a.list_names(), vec!["slides".to_string()]);
+    }
+
+    #[test]
+    fn a_move_lands_where_it_says_up_and_down() {
+        let (mut a, _) = list_pair(&["s1", "s2", "s3", "s4"]);
+        a.list_move("slides", "s1", 2).expect("down");
+        assert_eq!(a.list_ids("slides"), ids(&["s2", "s3", "s1", "s4"]));
+        a.list_move("slides", "s4", 0).expect("up");
+        assert_eq!(a.list_ids("slides"), ids(&["s4", "s2", "s3", "s1"]));
+        a.list_move("slides", "s2", 9).expect("clamped to the end");
+        assert_eq!(a.list_ids("slides"), ids(&["s4", "s3", "s1", "s2"]));
+        assert!(a.list_move("slides", "s2", 3).is_none(), "already there");
+    }
+
+    #[test]
+    fn two_concurrent_moves_of_one_id_converge_with_it_once_in_either_order() {
+        for a_first in [true, false] {
+            let (mut a, mut b) = list_pair(&["s1", "s2", "s3", "s4"]);
+            let ua = a.list_move("slides", "s1", 3).expect("A moves s1 to the end");
+            let ub = b.list_move("slides", "s1", 1).expect("B moves s1 to second");
+            if a_first {
+                exchange(&mut a, &mut b, &ua, &ub);
+            } else {
+                b.apply_doc_update(&ua).expect("B");
+                a.apply_doc_update(&ub).expect("A");
+            }
+            let read = a.list_ids("slides");
+            assert_eq!(read, b.list_ids("slides"), "converged");
+            assert_eq!(read.iter().filter(|i| *i == "s1").count(), 1, "{read:?}");
+            assert_eq!(read.len(), 4);
+            let raw = {
+                let l = a.list_ref("slides");
+                let t = a.doc.transact();
+                l.len(&t)
+            };
+            assert_eq!(raw, 4, "no copy in the CRDT either");
+        }
+    }
+
+    #[test]
+    fn a_move_against_a_remove_converges_with_the_id_gone() {
+        for a_first in [true, false] {
+            let (mut a, mut b) = list_pair(&["s1", "s2", "s3"]);
+            let ua = a.list_move("slides", "s1", 2).expect("A moves s1");
+            let ub = b.list_remove("slides", "s1").expect("B removes s1");
+            if a_first {
+                exchange(&mut a, &mut b, &ua, &ub);
+            } else {
+                b.apply_doc_update(&ua).expect("B");
+                a.apply_doc_update(&ub).expect("A");
+            }
+            assert_eq!(a.list_ids("slides"), b.list_ids("slides"));
+            assert_eq!(a.list_ids("slides"), ids(&["s2", "s3"]), "the removed id stays removed");
+        }
+    }
+
+    #[test]
+    fn two_authors_inserting_one_id_read_it_once_in_the_same_place() {
+        let (mut a, mut b) = list_pair(&["s1", "s2"]);
+        let ua = a.list_insert("slides", 0, "s9").expect("A inserts s9 first");
+        let ub = b.list_insert("slides", 2, "s9").expect("B inserts s9 last");
+        exchange(&mut a, &mut b, &ua, &ub);
+        let read = a.list_ids("slides");
+        assert_eq!(read, b.list_ids("slides"));
+        assert_eq!(read.iter().filter(|i| *i == "s9").count(), 1, "{read:?}");
+        let u = b.list_remove("slides", "s9").expect("removing removes every copy");
+        a.apply_doc_update(&u).expect("A");
+        assert_eq!(a.list_ids("slides"), ids(&["s1", "s2"]));
+    }
+
+    #[test]
+    fn undo_takes_back_only_this_authors_list_change() {
+        let (mut a, mut b) = list_pair(&["s1", "s2", "s3"]);
+        let ua = a.list_move("slides", "s3", 0).expect("A moves s3 up");
+        let ub = b.list_insert("slides", 3, "s4").expect("B adds s4");
+        exchange(&mut a, &mut b, &ua, &ub);
+        let undo = a.undo_local().expect("A undoes its move");
+        b.apply_doc_update(&undo).expect("B");
+        assert_eq!(a.list_ids("slides"), ids(&["s1", "s2", "s3", "s4"]));
+        assert_eq!(a.list_ids("slides"), b.list_ids("slides"));
+        assert!(a.undo_local().is_none(), "the seed and B's insert are not A's");
+    }
+
+    #[test]
+    fn lists_changed_reports_a_peers_change() {
+        let (mut a, mut b) = list_pair(&["s1"]);
+        assert_eq!(b.lists_changed(), vec!["slides".to_string()]);
+        assert!(b.lists_changed().is_empty());
+        let u = a.list_insert("slides", 1, "s2").expect("insert");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(b.lists_changed(), vec!["slides".to_string()]);
+    }
+
+    #[test]
+    fn a_snapshot_carries_bodies_and_lists_to_a_joiner() {
+        let (mut a, _) = pair(&[para("1", "hello")]);
+        a.list_seed("slides", &ids(&["s1", "s2"])).expect("list");
+        let mut joiner = TextMerge::new("c");
+        joiner.apply_doc_update(&a.full_update()).expect("snapshot");
+        assert_eq!(texts(&joiner), vec![("1".to_string(), "hello".to_string())]);
+        assert_eq!(joiner.list_ids("slides"), ids(&["s1", "s2"]));
     }
 }

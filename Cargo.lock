@@ -497,6 +497,8 @@ dependencies = [
 [[package]]
 name = "macula-craft-seam"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db8ce95a4a5ca066b600a86b6f95cb27cd1ae753fae1949490fda6b68b5b2fff"
 dependencies = [
  "serde",
  "serde_json",
@@ -504,11 +506,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "macula-craft-seam"
+version = "0.5.0"
+dependencies = [
+ "macula-craft-seam 0.4.0",
+ "serde",
+ "serde_json",
+ "yrs",
+]
+
+[[package]]
 name = "macula-craft-share"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "egui",
- "macula-craft-seam",
+ "macula-craft-seam 0.5.0",
  "qrcode",
  "rqrr",
  "serde_json",

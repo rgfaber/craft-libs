@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
@@ -12,9 +12,9 @@ repository = "https://github.com/echelon/craft-libs"
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 # the collaboration seam, published as macula-craft-seam; code keeps `craft_collab`
-craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.4" }
+craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.5" }
 # the share and sign-in windows, published as macula-craft-share; code keeps `craft_share`
-craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.4" }
+craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.5" }
 
 # shared dependencies of the craft libraries
 serde = { version = "1", features = ["derive"] }
