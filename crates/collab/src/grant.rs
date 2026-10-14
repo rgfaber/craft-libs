@@ -175,13 +175,16 @@ pub trait GrantVerifier: Send + Sync {
 /// the verified node id) and must not be expired. The adapter implements
 /// this over the realm's UCAN verification; the engine never sees a token.
 pub trait MembershipVerifier: Send + Sync {
-    /// Verifies that `ucan` is a live membership of this host's realm for
+    /// Verifies that `ucan` is a live membership of the shared realm for
     /// `node_id`, and returns when the membership ends (ms since the epoch):
     /// a document grant issued on it must never outlive it, so a revoked or
     /// lapsed membership takes the document access down with it.
     fn verify_member(&self, ucan: &str, node_id: &str, now_ms: u64) -> Result<u64, String>;
     /// The role realm members are admitted with (the host's mapping).
     fn role(&self) -> Role;
+    /// The shared realm, by name: what a realm invite names as its member
+    /// realm. It need not be the host's own realm or the transport's.
+    fn realm(&self) -> &str;
 }
 
 /// Mints grants, revocations and open tokens as the host. The adapter

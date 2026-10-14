@@ -11,8 +11,10 @@ use crate::grant::{Role, SignedGrant};
 /// The layout version. 2 added the host's signature over the envelope
 /// (version 1 invites are refused outright); 3 made the open token optional
 /// and added the realm-member role: a realm invite carries no token and is
-/// admitted by a live membership of `realm` instead.
-pub const INVITE_VERSION: u32 = 3;
+/// admitted by a live membership instead; 4 names that membership's realm
+/// (`member_realm`, which may differ from the transport's `realm`: a host in
+/// realm H sharing with the members of realm E) and the host's own realm.
+pub const INVITE_VERSION: u32 = 4;
 
 /// The signature context for invites.
 pub const INVITE_CONTEXT: &[u8] = b"craft-collab/invite/v1";
@@ -54,6 +56,16 @@ pub struct Invite {
     /// membership UCAN are admitted with this role.
     #[serde(default)]
     pub member_role: Option<Role>,
+    /// Set on a realm invite: the realm (by name) whose members are
+    /// admitted. The host verifies their memberships against that realm's
+    /// key from its own trust list; the joiner presents its membership of
+    /// this realm.
+    #[serde(default)]
+    pub member_realm: Option<String>,
+    /// The realm (by name) the host is attested in, when it has one: what
+    /// the joiner shows beside the host's name.
+    #[serde(default)]
+    pub host_realm: Option<String>,
     /// An invite-by-person: the node this invite is for (hex). The token
     /// then carries that holder, and every other node is refused at the door.
     #[serde(default)]
@@ -85,6 +97,8 @@ struct InviteBody<'a> {
     expires_ms: u64,
     token: Option<&'a SignedGrant>,
     member_role: Option<Role>,
+    member_realm: Option<&'a str>,
+    host_realm: Option<&'a str>,
     invitee: Option<&'a str>,
     invitee_name: Option<&'a str>,
 }
@@ -106,6 +120,8 @@ impl Invite {
             expires_ms: self.expires_ms,
             token: self.token.as_ref(),
             member_role: self.member_role,
+            member_realm: self.member_realm.as_deref(),
+            host_realm: self.host_realm.as_deref(),
             invitee: self.invitee.as_deref(),
             invitee_name: self.invitee_name.as_deref(),
         };
@@ -167,6 +183,8 @@ mod tests {
                 signature: vec![1, 2, 3],
             }),
             member_role: None,
+            member_realm: None,
+            host_realm: Some("io.macula".into()),
             invitee: None,
             invitee_name: None,
             signature: vec![9, 9, 9],
@@ -220,6 +238,33 @@ mod tests {
         assert_eq!(back.member_role, Some(Role::Viewer));
         // The role is covered by the signature.
         assert_ne!(realm_invite.signed_bytes().expect("bytes"), invite().signed_bytes().expect("bytes"),);
+    }
+
+    #[test]
+    fn a_cross_realm_invite_names_the_member_realm_and_the_host_realm_signed() {
+        let mut cross = invite();
+        cross.token = None;
+        cross.member_role = Some(Role::Editor);
+        cross.member_realm = Some("net.beam-campus".into());
+        let line = cross.encode().expect("encode");
+        let back = Invite::decode(&line).expect("decode");
+        assert_eq!(back.member_realm.as_deref(), Some("net.beam-campus"), "the realm whose members are admitted");
+        assert_eq!(back.host_realm.as_deref(), Some("io.macula"), "the realm the host is attested in");
+        let base = cross.signed_bytes().expect("bytes");
+        let mut swapped = cross.clone();
+        swapped.member_realm = Some("io.macula".into());
+        assert_ne!(base, swapped.signed_bytes().expect("bytes"), "the member realm is covered");
+        let mut swapped = cross.clone();
+        swapped.host_realm = Some("net.beam-campus".into());
+        assert_ne!(base, swapped.signed_bytes().expect("bytes"), "the host realm is covered");
+    }
+
+    #[test]
+    fn a_version_3_invite_is_refused() {
+        let mut old = invite();
+        old.v = 3;
+        let line = serde_json::to_string(&old).expect("json");
+        assert!(Invite::decode(&line).is_err(), "v3 names no member realm; a host must re-mint");
     }
 
     #[test]
