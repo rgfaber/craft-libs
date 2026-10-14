@@ -1,4 +1,4 @@
-//! The shared collaboration seam for the Craft apps (spike).
+//! A collaboration seam for document apps, built for the Craft apps.
 //!
 //! One mechanism, adopted by every app: a command or a cursor travels as a
 //! [`Message`] between peers, a [`Transport`] carries it (the mesh

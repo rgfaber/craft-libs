@@ -1,10 +1,13 @@
 [package]
-name = "craft-collab"
-description = "The shared collaboration seam for the Craft apps: op envelope, transport and document-adapter traits, paragraph text merge, presence"
+name = "macula-craft-seam"
+description = "A collaboration seam for document apps: signed ops, grants and invites, a transport trait, paragraph text merge (yrs) and presence. The Macula mesh transport is macula-craft-collab."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
+repository = "https://github.com/rgfaber/craft-libs"
+readme = "README.md"
+keywords = ["collaboration", "crdt", "editor", "macula"]
+categories = ["text-editors", "network-programming"]
 
 [lints]
 workspace = true

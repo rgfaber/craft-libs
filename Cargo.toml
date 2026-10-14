@@ -11,8 +11,8 @@ repository = "https://github.com/echelon/craft-libs"
 
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
-craft-collab = { path = "crates/collab" }
-craft-qr = { path = "crates/qr" }
+# the collaboration seam, published as macula-craft-seam; code keeps `craft_collab`
+craft-collab = { path = "crates/collab", package = "macula-craft-seam" }
 
 # shared dependencies of the craft libraries
 serde = { version = "1", features = ["derive"] }
