@@ -123,6 +123,20 @@ impl TextMerge {
         Some(txn.encode_update_v1())
     }
 
+    /// Seeds the register with what the document already holds when it is first shared: written
+    /// with no author, so no one's undo ever takes it back (an undo of a later edit returns to
+    /// it). The update to broadcast, `None` when there is nothing to seed.
+    pub fn register_seed(&mut self, entries: &[(String, String)]) -> Option<Vec<u8>> {
+        if entries.is_empty() {
+            return None;
+        }
+        let mut txn = self.doc.transact_mut();
+        for (key, value) in entries {
+            self.register.insert(&mut txn, key.as_str(), value.as_str());
+        }
+        Some(txn.encode_update_v1())
+    }
+
     /// Removes `key` as this author: the update to broadcast, `None` when
     /// the key was not there.
     pub fn register_remove(&mut self, key: &str) -> Option<Vec<u8>> {
@@ -793,6 +807,17 @@ mod tests {
             assert_eq!(m.register_get("A1"), None, "A's write is undone");
             assert_eq!(m.register_get("B1").as_deref(), Some("theirs"), "B's stays");
         }
+    }
+
+    #[test]
+    fn undo_after_a_seed_returns_to_the_seeded_value_not_to_nothing() {
+        let mut a = TextMerge::new("a");
+        a.register_seed(&[("c/1/A1".into(), "seeded".into())]).expect("seed");
+        assert!(a.undo_local().is_none(), "the seed is nobody's edit");
+        a.register_set("c/1/A1", "edited").expect("edit");
+        a.undo_local().expect("undo the edit");
+        assert_eq!(a.register_get("c/1/A1").as_deref(), Some("seeded"));
+        assert!(a.register_seed(&[]).is_none());
     }
 
     #[test]
