@@ -9,15 +9,23 @@
 //! Paragraphs outside the body (an app's table cells, say) keep a text of
 //! their own, keyed by their id, exactly as before.
 //!
+//! The same document holds a keyed register: opaque string keys to app
+//! values (a spreadsheet's cells, a shape's properties). Each key holds one
+//! value; when two authors write a key at once, every replica keeps the same
+//! one. Register writes travel and undo exactly like text edits.
+//!
 //! Offsets are bytes (yrs's default), which matches the apps' byte offsets.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use yrs::types::Attrs;
 use yrs::undo::{Options as UndoOptions, UndoManager};
 use yrs::updates::decoder::Decode;
-use yrs::{Any, Assoc, Doc, GetString, IndexedSequence, Options, Origin, Out, ReadTxn, StickyIndex, Text, TextRef, Transact, Update};
+use yrs::{
+    Any, Assoc, Doc, GetString, IndexedSequence, Map, MapRef, Observable, Options, Origin, Out, ReadTxn, StickyIndex, Subscription, Text, TextRef,
+    Transact, Update,
+};
 
 /// The body text's root name (paragraph ids are numeric strings, so it never
 /// names a paragraph).
@@ -29,6 +37,8 @@ const PROPS: &str = "props";
 /// The leader character itself: one byte, told apart from a typed line
 /// break by its `pid` attribute.
 const LEADER: &str = "\n";
+/// The keyed register's root name.
+const REGISTER: &str = "craft-register";
 
 /// One paragraph of the body, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +77,12 @@ pub struct TextMerge {
     undo: UndoManager<()>,
     /// Paragraphs outside the body whose own texts the undo manager covers.
     outside: HashSet<String>,
+    /// The keyed register, under the same undo manager.
+    register: MapRef,
+    /// Register keys changed since the app last asked: every write, local,
+    /// remote, undone or loaded, lands here.
+    changed: Arc<Mutex<BTreeSet<String>>>,
+    _watch: Subscription,
 }
 
 impl TextMerge {
@@ -83,8 +99,58 @@ impl TextMerge {
             capture_transaction: None,
             timestamp: std::sync::Arc::new(crate::session::now_ms),
         };
-        let undo = UndoManager::with_scope_and_options(&doc, &body, options);
-        TextMerge { doc, body, origin, undo, outside: HashSet::new() }
+        let mut undo = UndoManager::with_scope_and_options(&doc, &body, options);
+        let register = doc.get_or_insert_map(REGISTER);
+        undo.expand_scope(&register);
+        let changed = Arc::new(Mutex::new(BTreeSet::new()));
+        let sink = changed.clone();
+        let _watch = register.observe(move |txn, event| {
+            if let Ok(mut keys) = sink.lock() {
+                keys.extend(event.keys(txn).keys().map(|k| k.to_string()));
+            }
+        });
+        TextMerge { doc, body, origin, undo, outside: HashSet::new(), register, changed, _watch }
+    }
+
+    /// Writes `value` under `key` as this author: the update to broadcast,
+    /// `None` when the key already holds that value.
+    pub fn register_set(&mut self, key: &str, value: &str) -> Option<Vec<u8>> {
+        if self.register_get(key).as_deref() == Some(value) {
+            return None;
+        }
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        self.register.insert(&mut txn, key, value);
+        Some(txn.encode_update_v1())
+    }
+
+    /// Removes `key` as this author: the update to broadcast, `None` when
+    /// the key was not there.
+    pub fn register_remove(&mut self, key: &str) -> Option<Vec<u8>> {
+        self.register_get(key)?;
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        self.register.remove(&mut txn, key);
+        Some(txn.encode_update_v1())
+    }
+
+    /// The value under `key`.
+    pub fn register_get(&self, key: &str) -> Option<String> {
+        let txn = self.doc.transact();
+        self.register.get(&txn, key).and_then(|v| out_text(&v))
+    }
+
+    /// Every key and value, sorted by key.
+    pub fn register_entries(&self) -> Vec<(String, String)> {
+        let txn = self.doc.transact();
+        let mut entries: Vec<(String, String)> = self.register.iter(&txn).filter_map(|(k, v)| out_text(&v).map(|v| (k.to_string(), v))).collect();
+        entries.sort();
+        entries
+    }
+
+    /// The register keys changed since the last call, sorted: what the app
+    /// re-reads after applying a peer's update, an undo or a snapshot (its
+    /// own writes are listed too).
+    pub fn register_changed(&mut self) -> Vec<String> {
+        self.changed.lock().map(|mut keys| std::mem::take(&mut *keys).into_iter().collect()).unwrap_or_default()
     }
 
     fn body(&self) -> TextRef {
@@ -682,5 +748,60 @@ mod tests {
         let undo = a.undo_local().expect("its undo is covered too");
         b.apply_doc_update(&undo).expect("B applies");
         assert_eq!(b.text("cell-7"), "");
+    }
+
+    #[test]
+    fn concurrent_writes_to_one_key_keep_the_same_value_everywhere() {
+        let (mut a, mut b) = pair(&[para("1", "x")]);
+        let ua = a.register_set("s1!B2", "=1+1").expect("A writes");
+        let ub = b.register_set("s1!B2", "42").expect("B writes");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(a.register_get("s1!B2"), b.register_get("s1!B2"), "one winner, the same on both");
+        assert_eq!(a.register_entries(), b.register_entries());
+        assert_eq!(texts(&a), vec![("1".into(), "x".into())], "the body is untouched");
+    }
+
+    #[test]
+    fn a_peers_write_reports_its_key_and_an_unchanged_write_sends_nothing() {
+        let (mut a, mut b) = pair(&[para("1", "x")]);
+        a.register_changed();
+        let u = b.register_set("k", "v").expect("B writes");
+        assert!(b.register_set("k", "v").is_none(), "the same value again is no update");
+        a.apply_doc_update(&u).expect("A applies");
+        assert_eq!(a.register_changed(), vec!["k".to_string()]);
+        assert!(a.register_changed().is_empty(), "drained");
+        let gone = b.register_remove("k").expect("B removes");
+        assert!(b.register_remove("k").is_none(), "nothing left to remove");
+        a.apply_doc_update(&gone).expect("A applies");
+        assert_eq!(a.register_changed(), vec!["k".to_string()]);
+        assert_eq!(a.register_get("k"), None);
+    }
+
+    #[test]
+    fn undo_takes_back_only_this_authors_register_write() {
+        let (mut a, mut b) = pair(&[para("1", "x")]);
+        let ua = a.register_set("A1", "mine").expect("A");
+        b.apply_doc_update(&ua).expect("B gets A's");
+        std::thread::sleep(std::time::Duration::from_millis(600)); // a new undo step
+        let ub = b.register_set("B1", "theirs").expect("B");
+        a.apply_doc_update(&ub).expect("A gets B's");
+        a.register_changed();
+        let undone = a.undo_local().expect("A undoes");
+        assert_eq!(a.register_changed(), vec!["A1".to_string()], "the undo reports its key");
+        b.apply_doc_update(&undone).expect("B gets the undo");
+        for m in [&a, &b] {
+            assert_eq!(m.register_get("A1"), None, "A's write is undone");
+            assert_eq!(m.register_get("B1").as_deref(), Some("theirs"), "B's stays");
+        }
+    }
+
+    #[test]
+    fn a_snapshot_carries_the_register_to_a_joiner() {
+        let mut a = TextMerge::new("a");
+        a.register_set("sheet/1", "Sheet1").expect("write");
+        let mut joiner = TextMerge::new("j");
+        joiner.apply_doc_update(&a.full_update()).expect("seed");
+        assert_eq!(joiner.register_entries(), vec![("sheet/1".to_string(), "Sheet1".to_string())]);
+        assert_eq!(joiner.register_changed(), vec!["sheet/1".to_string()], "the joiner learns which keys to read");
     }
 }

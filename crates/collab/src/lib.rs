@@ -13,6 +13,7 @@
 pub mod contacts;
 pub mod grant;
 pub mod host;
+pub mod ids;
 pub mod invite;
 pub mod mem;
 pub mod message;
@@ -28,6 +29,7 @@ pub use grant::{
     mint_nonce,
 };
 pub use host::{CollabHost, DocAdapter, Origin};
+pub use ids::{author_id, author_tag};
 pub use invite::{INVITE_VERSION, Invite};
 pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
