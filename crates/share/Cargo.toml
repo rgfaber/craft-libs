@@ -1,0 +1,22 @@
+[package]
+name = "macula-craft-share"
+description = "The Share and Sign in windows for Craft apps (egui): invite, approve, revoke and contacts over macula-craft-seam's shared session, realm sign-in with a QR link."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/rgfaber/craft-libs"
+readme = "README.md"
+keywords = ["collaboration", "egui", "editor", "macula"]
+categories = ["gui", "text-editors"]
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-collab = { workspace = true }
+egui = { workspace = true }
+qrcode = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+rqrr = "0.9"

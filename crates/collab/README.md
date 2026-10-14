@@ -13,16 +13,22 @@ What the seam owns, independent of any network:
   `MembershipVerifier` trait.
 - **Invites**: one copyable line, signed by the host over every field.
 - **Contacts**: the people a device has met.
+- **The shared session**: `CollabSession` runs one shared document's protocol (join and
+  admission, grants and revocation, invites, contacts, snapshot retry, ordering, presence,
+  latency) and hands the app the peers' edits to apply. Grants and contacts persist through the
+  app's `TextStore`.
 
 What it leaves to an adapter: the `Transport` (how messages travel) and the
 issuer and verifiers (how keys sign and check). The Macula mesh adapter is
 [macula-craft-collab](https://crates.io/crates/macula-craft-collab). An app
-implements `CollabHost` and `DocAdapter` once.
+implements `CollabHost` and `DocAdapter` once and applies `CollabSession`'s inbound events to its
+document. The Share and Sign in windows (egui) are
+[macula-craft-share](https://crates.io/crates/macula-craft-share).
 
 The library name is `macula_craft_seam`; apps that call it `craft_collab` rename the dependency:
 
 ```toml
-craft-collab = { package = "macula-craft-seam", version = "0.1" }
+craft-collab = { package = "macula-craft-seam", version = "0.3" }
 ```
 
 Licensed under MIT or Apache-2.0, at your option.
