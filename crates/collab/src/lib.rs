@@ -30,5 +30,5 @@ pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
 pub use order::OrderBuffer;
 pub use presence::{Peer, Presence, color_for};
-pub use text::TextMerge;
+pub use text::{BodyParagraph, TextMerge};
 pub use transport::Transport;
