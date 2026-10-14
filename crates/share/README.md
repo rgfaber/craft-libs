@@ -22,7 +22,7 @@ craft_share::login::show(ctx, &mut login_state, &mut host);
 The library name is `macula_craft_share`; apps that call it `craft_share` rename the dependency:
 
 ```toml
-craft-share = { package = "macula-craft-share", version = "0.3" }
+craft-share = { package = "macula-craft-share", version = "0.5" }
 ```
 
 Licensed under MIT or Apache-2.0, at your option.
