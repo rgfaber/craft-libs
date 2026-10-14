@@ -6,7 +6,9 @@
 //! through [`TextMerge`], and [`Presence`] carries remote cursors. The app
 //! side of the seam is [`CollabHost`] (origin-aware dispatch) and
 //! [`DocAdapter`] (stable paragraph ids <-> text, snapshots), implemented
-//! once per app; wordcraft is first.
+//! once per app; wordcraft is first. [`CollabSession`] runs the protocol of
+//! one shared document (join, grants, invites, contacts, snapshots) and hands
+//! the app what to apply.
 
 pub mod contacts;
 pub mod grant;
@@ -16,6 +18,7 @@ pub mod mem;
 pub mod message;
 pub mod order;
 pub mod presence;
+pub mod session;
 pub mod text;
 pub mod transport;
 
@@ -30,5 +33,6 @@ pub use mem::MemoryTransport;
 pub use message::{Kind, Message};
 pub use order::OrderBuffer;
 pub use presence::{Peer, Presence, color_for};
+pub use session::{CollabSession, Inbound, ShareContext, TextStore, now_ms, short};
 pub use text::{BodyParagraph, TextMerge};
 pub use transport::Transport;
