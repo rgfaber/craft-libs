@@ -652,10 +652,13 @@ impl TextMerge {
     /// never sees an object without its payload. Text and objects are
     /// compared together, an object equal only to one with the same payload,
     /// and aligned token by token, so only what changed is removed and
-    /// inserted and every unchanged character keeps its item (a peer's
-    /// typing or deleting inside a newly commented selection stays inside): an object a peer deleted meanwhile
-    /// stays deleted, and one inserted next to it is its own item. `None`
-    /// when nothing changed.
+    /// inserted and every unchanged character keeps its item: a peer's
+    /// typing or deleting inside a newly commented selection stays inside,
+    /// an object a peer deleted meanwhile stays deleted, and one inserted
+    /// next to it is its own item. `None` when nothing changed.
+    ///
+    /// The alignment table is at most 4 million cells (16 MB, a large
+    /// paste into a long paragraph); past that the middle is one hunk.
     pub fn sync_objects(&mut self, para: &str, target: &str, objects: &[(u32, String)]) -> Option<Vec<u8>> {
         let current = self.text(para);
         let held = self.objects(para);
