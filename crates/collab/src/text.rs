@@ -23,6 +23,14 @@
 //! two authors inserting one id at once leave two copies in the CRDT, and
 //! every replica reads the first. Lists undo per author like the rest.
 //!
+//! An inline object (a comment's anchor, a bookmark, a field) is one
+//! [`OBJECT_CHAR`] in the text whose `obj` attribute holds the app's
+//! payload, the way a leader carries its paragraph id: it takes the bytes
+//! the app's own object character takes, travels, splits, joins and undoes
+//! like text, and concurrent typing around it lands where the author typed.
+//! An object is never re-tagged in place: changing one is removing it and
+//! inserting the new one, so its payload never moves to another item.
+//!
 //! Offsets are bytes (yrs's default), which matches the apps' byte offsets.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -46,6 +54,10 @@ const PROPS: &str = "props";
 /// The leader character itself: one byte, told apart from a typed line
 /// break by its `pid` attribute.
 const LEADER: &str = "\n";
+/// An inline object's attribute: the app's payload.
+const OBJ: &str = "obj";
+/// The character an inline object is in the text (U+FFFC, three bytes).
+pub const OBJECT_CHAR: char = '\u{FFFC}';
 /// The keyed register's root name.
 const REGISTER: &str = "craft-register";
 /// A named body's root name is this prefix and its name (an app's text
@@ -635,6 +647,100 @@ impl TextMerge {
         self.local_edit_exact(para, index, removed.len() as u32, &inserted)
     }
 
+    /// Makes the paragraph's CRDT text say `target` with its inline objects
+    /// `objects` (byte offset in `target`, payload), in one update: a peer
+    /// never sees an object without its payload. Text and objects are
+    /// compared together, an object equal only to one with the same payload,
+    /// so the one contiguous change between them is removed and inserted and
+    /// nothing outside it is touched: an object a peer deleted meanwhile
+    /// stays deleted, and one inserted next to it is its own item. `None`
+    /// when nothing changed.
+    pub fn sync_objects(&mut self, para: &str, target: &str, objects: &[(u32, String)]) -> Option<Vec<u8>> {
+        let current = self.text(para);
+        let held = self.objects(para);
+        let (a, b) = (tokens(&current, &held), tokens(target, objects));
+        let mut pre = 0;
+        while pre < a.len() && pre < b.len() && a[pre].1 == b[pre].1 && a[pre].2 == b[pre].2 {
+            pre += 1;
+        }
+        let mut suf = 0;
+        while suf < a.len() - pre
+            && suf < b.len() - pre
+            && a[a.len() - 1 - suf].1 == b[b.len() - 1 - suf].1
+            && a[a.len() - 1 - suf].2 == b[b.len() - 1 - suf].2
+        {
+            suf += 1;
+        }
+        let byte = |t: &[(usize, char, Option<&str>)], i: usize, whole: &str| t.get(i).map_or(whole.len(), |x| x.0);
+        let (from, to) = (byte(&a, pre, &current), byte(&a, a.len() - suf, &current));
+        if from == to && pre == b.len() - suf {
+            return None;
+        }
+        self.end_capture();
+        let (text, base) = match self.slot(para) {
+            Some(slot) => (self.edit_text(slot.body.as_deref()), slot.start()),
+            None => (self.outside_text(para), 0),
+        };
+        let mut txn = self.doc.transact_mut_with(self.origin.clone());
+        if to > from {
+            text.remove_range(&mut txn, base + from as u32, (to - from) as u32);
+        }
+        // The inserted middle, in runs: plain text, and each object with its payload.
+        let mut at = base + from as u32;
+        let mut run = String::new();
+        for &(_, c, payload) in &b[pre..b.len() - suf] {
+            match payload {
+                Some(p) => {
+                    if !run.is_empty() {
+                        text.insert_with_attributes(&mut txn, at, &run, plain_attrs());
+                        at += run.len() as u32;
+                        run.clear();
+                    }
+                    text.insert_with_attributes(&mut txn, at, &OBJECT_CHAR.to_string(), object_attrs(p));
+                    at += OBJECT_CHAR.len_utf8() as u32;
+                }
+                None => run.push(c),
+            }
+        }
+        if !run.is_empty() {
+            text.insert_with_attributes(&mut txn, at, &run, plain_attrs());
+        }
+        Some(txn.encode_update_v1())
+    }
+
+    /// The paragraph's inline objects, in order: each [`OBJECT_CHAR`] with a
+    /// payload, as (byte offset within the paragraph, payload). A bare
+    /// [`OBJECT_CHAR`] (text from before objects travelled) is not one.
+    pub fn objects(&self, para: &str) -> Vec<(u32, String)> {
+        let outside = (!self.in_body(para) && self.slot(para).is_none()).then(|| self.doc.get_or_insert_text(para.to_string()));
+        let slot = self.slot(para);
+        let txn = self.doc.transact();
+        let (chunks, range) = match (&outside, &slot) {
+            (None, Some(slot)) => {
+                (self.text_of(slot.body.as_deref()).diff(&txn, |_| ()), Some((slot.start(), slot.start() + slot.text.len() as u32)))
+            }
+            (Some(text), _) => (text.diff(&txn, |_| ()), None),
+            (None, None) => return Vec::new(),
+        };
+        let (from, to) = range.unwrap_or((0, u32::MAX));
+        let mut out = Vec::new();
+        let mut pos = 0u32;
+        for chunk in chunks {
+            let Some(s) = out_text(&chunk.insert) else { continue };
+            let payload = chunk.attributes.as_deref().and_then(|a| a.get(OBJ)).and_then(any_string);
+            if let Some(payload) = payload {
+                for (i, c) in s.char_indices() {
+                    let at = pos + i as u32;
+                    if c == OBJECT_CHAR && at >= from && at < to {
+                        out.push((at - from, payload.clone()));
+                    }
+                }
+            }
+            pos += s.len() as u32;
+        }
+        out
+    }
+
     /// Splits body paragraph `para` at byte `at`: everything after `at`
     /// becomes the new paragraph `new_para` (with `props`). One leader is
     /// inserted; no text moves, so concurrent typing anywhere survives and
@@ -851,7 +957,22 @@ fn leader_attrs(para: &str, props: Option<&str>) -> Attrs {
 
 /// The paragraph attributes ended: what every non-leader insert carries.
 fn plain_attrs() -> Attrs {
-    [(Arc::<str>::from(PID), Any::Null), (Arc::<str>::from(PROPS), Any::Null)].into_iter().collect()
+    [(Arc::<str>::from(PID), Any::Null), (Arc::<str>::from(PROPS), Any::Null), (Arc::<str>::from(OBJ), Any::Null)].into_iter().collect()
+}
+
+/// An inline object's attributes: plain, with its payload.
+fn object_attrs(payload: &str) -> Attrs {
+    let mut attrs = plain_attrs();
+    attrs.insert(Arc::<str>::from(OBJ), Any::String(Arc::from(payload)));
+    attrs
+}
+
+/// A paragraph's text as tokens for [`TextMerge::sync_objects`]: each char,
+/// with its payload when it is an object (a bare [`OBJECT_CHAR`] has none).
+fn tokens<'a>(text: &'a str, objects: &'a [(u32, String)]) -> Vec<(usize, char, Option<&'a str>)> {
+    text.char_indices()
+        .map(|(i, c)| (i, c, (c == OBJECT_CHAR).then(|| objects.iter().find(|(at, _)| *at as usize == i).map(|(_, p)| p.as_str())).flatten()))
+        .collect()
 }
 
 fn any_string(v: &Any) -> Option<String> {
@@ -1560,5 +1681,136 @@ mod named_tests {
         joiner.apply_doc_update(&a.full_update()).expect("snapshot");
         assert_eq!(texts(&joiner), vec![("1".to_string(), "hello".to_string())]);
         assert_eq!(joiner.list_ids("slides"), ids(&["s1", "s2"]));
+    }
+}
+
+#[cfg(test)]
+mod object_tests {
+    use super::*;
+
+    const O: char = OBJECT_CHAR;
+
+    fn pair(text: &str) -> (TextMerge, TextMerge) {
+        let mut a = TextMerge::new("a");
+        let mut b = TextMerge::new("b");
+        let seed = a.seed_body(&[BodyParagraph { para: "p1".into(), text: text.into(), props: None }]).expect("seed");
+        b.apply_doc_update(&seed).expect("B seeds");
+        (a, b)
+    }
+
+    fn exchange(a: &mut TextMerge, b: &mut TextMerge, ua: &[u8], ub: &[u8]) {
+        a.apply_doc_update(ub).expect("A applies");
+        b.apply_doc_update(ua).expect("B applies");
+    }
+
+    fn obj(at: usize, payload: &str) -> (u32, String) {
+        (at as u32, payload.to_string())
+    }
+
+    /// The paragraph as an app holds it: its text, with each object's payload in place of its char.
+    fn shown(m: &TextMerge) -> String {
+        let (text, objects) = (m.text("p1"), m.objects("p1"));
+        text.char_indices()
+            .map(|(i, c)| match objects.iter().find(|(at, _)| *at as usize == i) {
+                Some((_, p)) => format!("[{p}]"),
+                None => c.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_objects_placed_at_once_in_one_paragraph_land_alike() {
+        let (mut a, mut b) = pair("Quarterly plan");
+        // A anchors "Quar"'s start, B "plan"'s start, neither having seen the other.
+        let ua = a.sync_objects("p1", &format!("{O}Quarterly plan"), &[obj(0, "x")]).expect("A");
+        let ub = b.sync_objects("p1", &format!("Quarterly {O}plan"), &[obj(10, "y")]).expect("B");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(shown(&a), shown(&b));
+        assert_eq!(shown(&a), "[x]Quarterly [y]plan");
+    }
+
+    #[test]
+    fn an_object_inserted_before_one_a_peer_deletes_survives_alone() {
+        let (mut a, mut b) = pair("ab");
+        let seed = a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "y")]).expect("Y");
+        b.apply_doc_update(&seed).expect("B has Y");
+        // A puts X right before Y; B deletes Y meanwhile.
+        let ua = a.sync_objects("p1", &format!("a{O}{O}b"), &[obj(1, "x"), obj(4, "y")]).expect("A");
+        let ub = b.sync_objects("p1", "ab", &[]).expect("B");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(shown(&a), shown(&b));
+        assert_eq!(shown(&a), "a[x]b", "exactly X is left");
+    }
+
+    #[test]
+    fn an_object_keeps_its_payload_across_a_split_and_a_join() {
+        let (mut a, mut b) = pair("onetwo");
+        let u = a.sync_objects("p1", &format!("one{O}two"), &[obj(3, "x")]).expect("x");
+        b.apply_doc_update(&u).expect("B");
+        // Split right before the object, then join back.
+        let u = a.local_split("p1", 3, "p2", None).expect("split");
+        b.apply_doc_update(&u).expect("B split");
+        assert_eq!(b.objects("p2"), vec![obj(0, "x")], "the object moved with its text");
+        assert!(b.objects("p1").is_empty());
+        let u = b.local_join("p2").expect("join");
+        a.apply_doc_update(&u).expect("A join");
+        assert_eq!(shown(&a), shown(&b));
+        assert_eq!(shown(&a), "one[x]two");
+    }
+
+    #[test]
+    fn typing_after_an_object_is_plain_text() {
+        let (mut a, mut b) = pair("ab");
+        let u = a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "x")]).expect("x");
+        b.apply_doc_update(&u).expect("B");
+        let u = b.local_edit_exact("p1", 4, 0, "typed").expect("type");
+        a.apply_doc_update(&u).expect("A");
+        assert_eq!(shown(&a), "a[x]typedb");
+        assert_eq!(a.objects("p1"), vec![obj(1, "x")], "the typed text took no payload");
+    }
+
+    #[test]
+    fn undo_takes_an_object_back_everywhere() {
+        let (mut a, mut b) = pair("ab");
+        let u = a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "x")]).expect("x");
+        b.apply_doc_update(&u).expect("B");
+        let u = a.undo_local().expect("undo");
+        b.apply_doc_update(&u).expect("B undo");
+        assert_eq!((shown(&a), shown(&b)), ("ab".into(), "ab".into()));
+    }
+
+    #[test]
+    fn bold_over_an_object_keeps_its_payload() {
+        let (mut a, mut b) = pair("ab");
+        let u = a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "x")]).expect("x");
+        b.apply_doc_update(&u).expect("B");
+        let u = b.local_bold("p1", 0, 5, true).expect("bold");
+        a.apply_doc_update(&u).expect("A");
+        assert_eq!(a.objects("p1"), vec![obj(1, "x")]);
+        assert_eq!(a.bold_spans("p1"), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn a_sync_touches_only_what_changed() {
+        let (mut a, mut b) = pair("ab");
+        let u = a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "x")]).expect("x");
+        b.apply_doc_update(&u).expect("B");
+        assert!(a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "x")]).is_none(), "nothing changed");
+        // A types far from the object while B deletes it: A's sync must not bring it back.
+        let ua = a.sync_objects("p1", &format!("a{O}b and more"), &[obj(1, "x")]).expect("A");
+        let ub = b.sync_objects("p1", "ab", &[]).expect("B");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(shown(&a), shown(&b));
+        assert_eq!(shown(&a), "ab and more");
+    }
+
+    #[test]
+    fn a_bare_object_char_is_tagged_by_its_first_sync() {
+        let (mut a, mut b) = pair(&format!("a{O}b"));
+        assert!(a.objects("p1").is_empty(), "seeded before objects travelled: bare");
+        let u = a.sync_objects("p1", &format!("a{O}b"), &[obj(1, "x")]).expect("tag");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(b.objects("p1"), vec![obj(1, "x")]);
+        assert_eq!(b.text("p1"), format!("a{O}b"));
     }
 }

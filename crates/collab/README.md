@@ -14,7 +14,12 @@ What the seam owns, independent of any network:
   - **named bodies**, one per text frame (a slide's text box, say), with the same behaviour;
   - a **keyed register** of opaque keys to app values (a cell, a shape's properties), last
     writer wins;
-  - **ordered id lists** (slide order, z-order), where concurrent moves never duplicate an id.
+  - **ordered id lists** (slide order, z-order), where concurrent moves never duplicate an id;
+  - **inline objects** (a comment's anchor, a bookmark, a field) in any paragraph: one
+    `OBJECT_CHAR` carrying the app's payload, put there with `sync_objects` and read with
+    `objects`, so it keeps its place among concurrent typing, splits and joins. An object is
+    never re-tagged in place; changing one replaces it. Peers on seam 0.5.0 and older see a
+    plain U+FFFC without the payload.
 
   Ids are opaque strings; `ids::author_id` mints author-scoped numeric ones.
 - **Access**: per-document grants (viewer or editor) signed by the host, monotonic revocation,
