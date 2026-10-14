@@ -456,22 +456,44 @@ impl TextMerge {
     }
 
     /// Moves `id` so it reads at `to` (clamped) as this author: the update,
-    /// `None` when it is not listed or already there.
+    /// `None` when it is not listed or already there. Any other copy of the
+    /// id (two authors inserted it at once) goes in the same change, so the
+    /// moved one is the one every replica reads.
     pub fn list_move(&mut self, name: &str, id: &str, to: u32) -> Option<Vec<u8>> {
         let ids = self.list_ids(name);
-        let from = ids.iter().position(|i| i == id)? as u32;
-        let to = to.min(ids.len() as u32 - 1);
-        if from == to {
+        let from = ids.iter().position(|i| i == id)?;
+        let to = (to as usize).min(ids.len() - 1);
+        let list = self.edit_list(name);
+        let copies = {
+            let txn = self.doc.transact();
+            list.iter(&txn).filter(|v| out_text(v).as_deref() == Some(id)).count()
+        };
+        if from == to && copies == 1 {
             return None;
         }
-        let list = self.edit_list(name);
-        let source = self.raw_index(&list, &ids, from);
-        // move_to places the item before what stands at the target now, so
-        // a move down targets the slot after the destination.
-        let target = self.raw_index(&list, &ids, if to > from { to + 1 } else { to });
         self.undo.reset();
         let mut txn = self.doc.transact_mut_with(self.origin.clone());
-        list.move_to(&mut txn, source, target);
+        let raw = |txn: &yrs::TransactionMut| list.iter(txn).map(|v| out_text(&v).unwrap_or_default()).collect::<Vec<String>>();
+        // Every copy after the first goes.
+        let first = raw(&txn).iter().position(|v| v == id).unwrap_or(0);
+        let extra: Vec<u32> = raw(&txn).iter().enumerate().filter(|(i, v)| *i != first && v.as_str() == id).map(|(i, _)| i as u32).collect();
+        for i in extra.into_iter().rev() {
+            list.remove(&mut txn, i);
+        }
+        if from != to {
+            // The raw index of the `n`th id as read (the first copy of each),
+            // or the end.
+            let at = |raw: &[String], n: usize| -> u32 {
+                let mut seen = HashSet::new();
+                raw.iter().enumerate().filter(|(_, v)| seen.insert(v.as_str())).nth(n).map_or(raw.len() as u32, |(i, _)| i as u32)
+            };
+            let now = raw(&txn);
+            let source = at(&now, from);
+            // move_to places the item before what stands at the target now,
+            // so a move down targets the slot after the destination.
+            let target = at(&now, if to > from { to + 1 } else { to });
+            list.move_to(&mut txn, source, target);
+        }
         Some(txn.encode_update_v1())
     }
 
@@ -1403,6 +1425,43 @@ mod named_tests {
         let u = b.list_remove("slides", "s9").expect("removing removes every copy");
         a.apply_doc_update(&u).expect("A");
         assert_eq!(a.list_ids("slides"), ids(&["s1", "s2"]));
+    }
+
+    #[test]
+    fn a_move_after_two_concurrent_inserts_moves_what_every_replica_reads() {
+        let (mut a, mut b) = list_pair(&["a", "b"]);
+        let ua = a.list_insert("slides", 0, "x").expect("A inserts x first");
+        let ub = b.list_insert("slides", 1, "x").expect("B inserts x second");
+        exchange(&mut a, &mut b, &ua, &ub);
+        assert_eq!(a.list_ids("slides"), b.list_ids("slides"));
+        let u = a.list_move("slides", "x", 2).expect("A moves x to the end");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(a.list_ids("slides"), ids(&["a", "b", "x"]));
+        assert_eq!(b.list_ids("slides"), ids(&["a", "b", "x"]));
+        let raw = {
+            let l = b.list_ref("slides");
+            let t = b.doc.transact();
+            l.len(&t)
+        };
+        assert_eq!(raw, 3, "the other copy went with the move");
+    }
+
+    #[test]
+    fn a_move_in_place_still_drops_a_duplicate() {
+        let (mut a, mut b) = list_pair(&["a"]);
+        let ua = a.list_insert("slides", 1, "x").expect("A");
+        let ub = b.list_insert("slides", 0, "x").expect("B");
+        exchange(&mut a, &mut b, &ua, &ub);
+        let at = a.list_ids("slides").iter().position(|i| i == "x").expect("listed") as u32;
+        let u = a.list_move("slides", "x", at).expect("an in-place move cleans up the copy");
+        b.apply_doc_update(&u).expect("B");
+        assert_eq!(a.list_ids("slides"), b.list_ids("slides"));
+        let raw = {
+            let l = b.list_ref("slides");
+            let t = b.doc.transact();
+            l.len(&t)
+        };
+        assert_eq!(raw, 2);
     }
 
     #[test]
