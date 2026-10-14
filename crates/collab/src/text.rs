@@ -75,7 +75,14 @@ impl TextMerge {
         let doc = Doc::with_options(Options::default());
         let body = doc.get_or_insert_text(BODY);
         let origin = Origin::from(author.to_string());
-        let options = UndoOptions { tracked_origins: HashSet::from([origin.clone()]), ..UndoOptions::default() };
+        // Built in full: yrs has no default undo options on wasm, and its own
+        // clock panics without a system time. Ours reads 0 there.
+        let options = UndoOptions {
+            capture_timeout_millis: 500,
+            tracked_origins: HashSet::from([origin.clone()]),
+            capture_transaction: None,
+            timestamp: std::sync::Arc::new(crate::session::now_ms),
+        };
         let undo = UndoManager::with_scope_and_options(&doc, &body, options);
         TextMerge { doc, body, origin, undo, outside: HashSet::new() }
     }
