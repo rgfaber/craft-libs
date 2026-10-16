@@ -570,18 +570,20 @@ impl CollabSession {
 
     /// A joiner admitted by membership asks the host to extend its grant
     /// before it ends, presenting its current membership. Only while its own
-    /// table still holds a grant for it (a revocation removes it, so a
-    /// revoked joiner never knocks), and never on the first-join state, so
-    /// an extension cannot reload the document.
+    /// table still holds a live grant for it (a revocation removes it, so a
+    /// revoked joiner never knocks; a lapsed one stops), and never on the
+    /// first-join state, so an extension cannot reload the document.
     fn ask_for_extension(&mut self, now: u64) {
         if self.awaiting_grant || self.issuer.is_some() {
             return;
         }
-        let Some(membership) = self.transport.membership().or_else(|| self.membership.clone()) else { return };
+        // Only a live grant (within its clock tolerance, the host's own
+        // test) is extended: past it the person joins again by invite.
         let Some(grant) = self.access.as_ref().and_then(|access| access.grant_for(&self.author)) else { return };
-        if grant.expires_ms > now.saturating_add(EXTEND_BEFORE_MS) {
+        if !grant.is_live(now) || grant.expires_ms > now.saturating_add(EXTEND_BEFORE_MS) {
             return;
         }
+        let Some(membership) = self.transport.membership().or_else(|| self.membership.clone()) else { return };
         if self.extend_membership.as_deref() != Some(membership.as_str()) {
             self.extend_membership = Some(membership.clone());
             self.extend_attempts = 0;

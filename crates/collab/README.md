@@ -27,7 +27,7 @@ What the seam owns, independent of any network:
   `MembershipVerifier` trait. A member's grant never outlives the membership token it was
   issued on; while the adapter renews that token (`Transport::membership`), the joiner asks
   for an extension before its grant ends, and the host extends it without asking again,
-  keeping its role and never shortening it. A member the realm stops admitting loses the
+  keeping its role (a person the host invited as an editor stays one) and never shortening it. A member the realm stops admitting loses the
   document when its last token ends, plus the grants' 5 minutes of clock tolerance. A holder
   the host revoked is never readmitted without the host's yes, even under auto-approve.
 - **Invites**: one copyable line, signed by the host over every field.

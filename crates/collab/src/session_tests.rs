@@ -511,6 +511,27 @@ fn an_extension_never_shortens_or_downgrades_a_grant() {
 }
 
 #[test]
+fn an_extension_keeps_the_role_the_host_gave() {
+    let mut bus = MemoryTransport::bus(&[HOST, "bbbbbbbb", "bbbbbbbb"]);
+    let (ta, tb, tb_again) = (bus.remove(0), bus.remove(0), bus.remove(0));
+    let mut h = host(ta, "doc", true);
+    // The realm admits its members as viewers, for longer than the grant Bob holds.
+    h.collab.set_member_verifier(Box::new(RenewingMemberVerifier { ends: vec![("m".into(), now_ms() + 48 * 3_600_000)], role: Role::Viewer }));
+    let mut bob = joiner(tb, "Bob", Some(token(HOST, Role::Editor)), None);
+    admit(&mut h, &mut bob);
+    let before = bea_grant(&h);
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut tb_again = tb_again;
+    tb_again.poll();
+    let mut knock = joiner(tb_again, "Bob", None, Some("m"));
+    knock.tick();
+    h.tick();
+    let after = bea_grant(&h);
+    assert!(after.expires_ms > before.expires_ms, "extended");
+    assert_eq!(after.role, Role::Editor, "with the role the host gave, not the realm's");
+}
+
+#[test]
 fn a_holder_the_host_revoked_is_never_readmitted_without_the_host() {
     let mut bus = MemoryTransport::bus(&[HOST, "bbbbbbbb", "bbbbbbbb"]);
     let (ta, tb, tb_again) = (bus.remove(0), bus.remove(0), bus.remove(0));
@@ -528,6 +549,7 @@ fn a_holder_the_host_revoked_is_never_readmitted_without_the_host() {
         h.tick();
     }
     assert!(h.collab.holders().is_empty(), "the revoked joiner's renewal admits nothing");
+    assert!(h.collab.pending().is_empty(), "and the revoked joiner does not knock");
 
     // A fresh join by membership from that node, under auto-approve, waits
     // for the host. (A session made in the same millisecond shares an epoch.)
