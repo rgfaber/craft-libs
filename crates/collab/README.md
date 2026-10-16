@@ -24,7 +24,12 @@ What the seam owns, independent of any network:
   Ids are opaque strings; `ids::author_id` mints author-scoped numeric ones.
 - **Access**: per-document grants (viewer or editor) signed by the host, monotonic revocation,
   open and per-person invite tokens, and realm-membership admission through the
-  `MembershipVerifier` trait.
+  `MembershipVerifier` trait. A member's grant never outlives the membership token it was
+  issued on; while the adapter renews that token (`Transport::membership`), the joiner asks
+  for an extension before its grant ends, and the host extends it without asking again,
+  keeping its role and never shortening it. A member the realm stops admitting loses the
+  document when its last token ends, plus the grants' 5 minutes of clock tolerance. A holder
+  the host revoked is never readmitted without the host's yes, even under auto-approve.
 - **Invites**: one copyable line, signed by the host over every field.
 - **Contacts**: the people a device has met.
 - **The shared session**: `CollabSession` runs one shared document's protocol (join and

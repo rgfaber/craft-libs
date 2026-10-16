@@ -412,6 +412,17 @@ impl Access {
         self.holders.len()
     }
 
+    /// The grant installed for `holder`, live or not.
+    pub fn grant_for(&self, holder: &str) -> Option<&Grant> {
+        self.holders.get(holder)
+    }
+
+    /// Whether the host has revoked `holder` at some point: such a holder
+    /// is never readmitted without the host's yes.
+    pub fn was_revoked(&self, holder: &str) -> bool {
+        self.revoked.contains_key(holder)
+    }
+
     /// The holder ids, sorted (the UI's People list).
     pub fn holder_ids(&self) -> Vec<String> {
         self.holders.keys().cloned().collect()

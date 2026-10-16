@@ -394,3 +394,149 @@ fn undo_local_shares_the_change_and_peers_and_cursors_show() {
     assert_eq!(a.stats()["peers"][0]["hasCursor"], true);
     assert_eq!(short("0123456789"), "01234567");
 }
+
+// macula-realm#46 step 3: a realm member's grant is extended while the
+// membership is renewed, and never past what the host decided.
+
+/// Several accepted memberships, each with its own end.
+struct RenewingMemberVerifier {
+    ends: Vec<(String, u64)>,
+    role: Role,
+}
+
+impl MembershipVerifier for RenewingMemberVerifier {
+    fn verify_member(&self, ucan: &str, _node_id: &str, _now_ms: u64) -> Result<u64, String> {
+        self.ends.iter().find(|(u, _)| u == ucan).map(|(_, end)| *end).ok_or_else(|| "not a member".to_string())
+    }
+
+    fn role(&self) -> Role {
+        self.role
+    }
+
+    fn realm(&self) -> &str {
+        "test.realm-e"
+    }
+}
+
+/// A memory transport whose membership the test renews, the way
+/// macula-craft-collab's renewal loop does.
+struct RenewedTransport {
+    inner: MemoryTransport,
+    membership: Arc<Mutex<Option<String>>>,
+}
+
+impl Transport for RenewedTransport {
+    fn author(&self) -> String {
+        self.inner.author()
+    }
+
+    fn send(&mut self, msg: Message) -> Result<(), String> {
+        self.inner.send(msg)
+    }
+
+    fn poll(&mut self) -> Vec<Message> {
+        self.inner.poll()
+    }
+
+    fn membership(&self) -> Option<String> {
+        self.membership.lock().ok()?.clone()
+    }
+}
+
+fn renewing_joiner(transport: MemoryTransport, first: &str) -> (App, Arc<Mutex<Option<String>>>) {
+    let slot = Arc::new(Mutex::new(None));
+    let transport = RenewedTransport { inner: transport, membership: slot.clone() };
+    let mut collab = CollabSession::join_requesting("demo", "Bea", Box::new(transport), None, Some(first.to_string()));
+    collab.set_access(table());
+    (App::new(collab, ""), slot)
+}
+
+fn bea_grant(h: &App) -> Grant {
+    let signed = h.collab.access.as_ref().and_then(|a| a.signed_grants().into_iter().find(|g| g.grant.holder == "bbbbbbbb"));
+    signed.map(|s| s.grant).unwrap_or_else(|| panic!("Bea holds no grant"))
+}
+
+#[test]
+fn a_renewed_membership_extends_the_grant_without_asking_the_host_again() {
+    let (first_end, renewed_end) = (now_ms() + 60_000, now_ms() + 3_600_000);
+    let (ta, tb) = pair();
+    let mut h = host(ta, "doc", false);
+    h.collab.set_member_verifier(Box::new(RenewingMemberVerifier {
+        ends: vec![("m1".into(), first_end), ("m2".into(), renewed_end)],
+        role: Role::Editor,
+    }));
+    let (mut bea, slot) = renewing_joiner(tb, "m1");
+    bea.tick();
+    h.tick();
+    h.collab.approve("bbbbbbbb").unwrap();
+    admit(&mut h, &mut bea);
+    assert!(bea_grant(&h).expires_ms <= first_end);
+
+    bea.doc = "edited".into();
+    // A grant issued in the same millisecond is not newer: let the clock move.
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    *slot.lock().unwrap() = Some("m2".into());
+    bea.tick();
+    h.tick();
+    bea.tick();
+    assert!(h.collab.pending().is_empty(), "the host is not asked again");
+    let grant = bea_grant(&h);
+    assert!(grant.expires_ms > first_end && grant.expires_ms <= renewed_end, "extended to the renewed membership's end");
+    assert_eq!(grant.role, Role::Editor);
+    assert!(!bea.collab.awaiting_snapshot(), "an extension never reloads the document");
+    assert_eq!(bea.doc, "edited");
+}
+
+#[test]
+fn an_extension_never_shortens_or_downgrades_a_grant() {
+    let mut bus = MemoryTransport::bus(&[HOST, "bbbbbbbb", "bbbbbbbb"]);
+    let (ta, tb, tb_again) = (bus.remove(0), bus.remove(0), bus.remove(0));
+    let mut h = host(ta, "doc", true);
+    h.collab.set_member_verifier(Box::new(RenewingMemberVerifier { ends: vec![("m".into(), now_ms() + 600_000)], role: Role::Viewer }));
+    // Bob holds a 24 h editor grant from an invite...
+    let mut bob = joiner(tb, "Bob", Some(token(HOST, Role::Editor)), None);
+    admit(&mut h, &mut bob);
+    let before = bea_grant(&h);
+    // ...and his node then presents a shorter viewer membership. (The new
+    // endpoint drops what the bus carried before it joined.)
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut tb_again = tb_again;
+    tb_again.poll();
+    let mut knock = joiner(tb_again, "Bob", None, Some("m"));
+    knock.tick();
+    h.tick();
+    let after = bea_grant(&h);
+    assert_eq!(after.expires_ms, before.expires_ms, "never shortened");
+    assert_eq!(after.role, Role::Editor, "never downgraded");
+}
+
+#[test]
+fn a_holder_the_host_revoked_is_never_readmitted_without_the_host() {
+    let mut bus = MemoryTransport::bus(&[HOST, "bbbbbbbb", "bbbbbbbb"]);
+    let (ta, tb, tb_again) = (bus.remove(0), bus.remove(0), bus.remove(0));
+    let mut h = host(ta, "doc", true);
+    h.collab.set_member_verifier(Box::new(RenewingMemberVerifier {
+        ends: vec![("m1".into(), now_ms() + 60_000), ("m2".into(), now_ms() + 3_600_000)],
+        role: Role::Editor,
+    }));
+    let (mut bea, slot) = renewing_joiner(tb, "m1");
+    admit(&mut h, &mut bea);
+    h.collab.revoke("bbbbbbbb").unwrap();
+    *slot.lock().unwrap() = Some("m2".into());
+    for _ in 0..3 {
+        bea.tick();
+        h.tick();
+    }
+    assert!(h.collab.holders().is_empty(), "the revoked joiner's renewal admits nothing");
+
+    // A fresh join by membership from that node, under auto-approve, waits
+    // for the host. (A session made in the same millisecond shares an epoch.)
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut tb_again = tb_again;
+    tb_again.poll();
+    let mut again = joiner(tb_again, "Bea", None, Some("m2"));
+    again.tick();
+    h.tick();
+    assert!(h.collab.holders().is_empty(), "no grant without the host");
+    assert_eq!(h.collab.pending(), vec![("bbbbbbbb".to_string(), "Bea".to_string())], "the host decides");
+}

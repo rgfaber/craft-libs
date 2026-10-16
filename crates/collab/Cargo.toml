@@ -2,7 +2,8 @@
 name = "macula-craft-seam"
 description = "A collaboration seam for document apps: signed ops, grants and invites, a transport trait, paragraph text merge (yrs) and presence. The Macula mesh transport is macula-craft-collab."
 # 0.5.1: inline objects (sync_objects, objects); the share crate stays on the workspace 0.5.0.
-version = "0.5.1"
+# 0.5.2: a realm member's grant is extended while the membership renews; a revoked holder waits for the host.
+version = "0.5.2"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/rgfaber/craft-libs"

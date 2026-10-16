@@ -15,4 +15,11 @@ pub trait Transport: Send {
     fn send(&mut self, msg: Message) -> Result<(), String>;
     /// Takes the messages that arrived since the last poll.
     fn poll(&mut self) -> Vec<Message>;
+    /// This node's current realm membership UCAN, when the adapter renews
+    /// one (macula-craft-collab does, every 10 minutes): what a joiner
+    /// admitted by membership presents to have its grant extended. `None`
+    /// keeps the membership the session joined with.
+    fn membership(&self) -> Option<String> {
+        None
+    }
 }

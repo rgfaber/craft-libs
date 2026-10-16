@@ -36,6 +36,14 @@ const MAX_ATTEMPTS: u32 = 5;
 /// How long a joiner waits between two admission or snapshot requests.
 const RETRY_MS: u64 = 2_000;
 
+/// A joiner admitted by realm membership asks for an extension once its
+/// grant ends within this long (macula-realm#46: the realm mints for 1 hour
+/// and the adapter renews every 10 minutes).
+const EXTEND_BEFORE_MS: u64 = 10 * 60 * 1_000;
+
+/// How long a joiner waits between two extension requests.
+const EXTEND_RETRY_MS: u64 = 60 * 1_000;
+
 /// Milliseconds since the UNIX epoch, 0 on wasm. A clockless peer holds no
 /// live grant (grants need a wall clock), so collaboration is only wired
 /// where a real clock exists.
@@ -141,6 +149,12 @@ pub struct CollabSession {
     awaiting_grant: bool,
     grant_attempts: u32,
     last_grant_ms: u64,
+    /// The membership the last extension requests presented, how many were
+    /// sent with it and when the last one went: a membership that stops
+    /// renewing is presented at most [`MAX_ATTEMPTS`] times.
+    extend_membership: Option<String>,
+    extend_attempts: u32,
+    last_extend_ms: u64,
     /// Join requests waiting for the host's yes, by node id.
     pending: BTreeMap<String, PendingJoin>,
     /// Whether the host admits a valid token without asking.
@@ -184,6 +198,9 @@ impl CollabSession {
             member_verifier: None,
             awaiting_grant: false,
             grant_attempts: 0,
+            extend_membership: None,
+            extend_attempts: 0,
+            last_extend_ms: 0,
             last_grant_ms: 0,
             pending: BTreeMap::new(),
             auto_approve: false,
@@ -469,6 +486,7 @@ impl CollabSession {
             let (token, membership, name) = (self.token.clone(), self.membership.clone(), self.name.clone());
             self.send(Kind::JoinRequest { token, name, membership });
         }
+        self.ask_for_extension(now);
         // A publication can be lost; the request is cheap and idempotent.
         if self.awaiting_snapshot
             && self.snapshot_attempts < MAX_ATTEMPTS
@@ -550,6 +568,34 @@ impl CollabSession {
         }
     }
 
+    /// A joiner admitted by membership asks the host to extend its grant
+    /// before it ends, presenting its current membership. Only while its own
+    /// table still holds a grant for it (a revocation removes it, so a
+    /// revoked joiner never knocks), and never on the first-join state, so
+    /// an extension cannot reload the document.
+    fn ask_for_extension(&mut self, now: u64) {
+        if self.awaiting_grant || self.issuer.is_some() {
+            return;
+        }
+        let Some(membership) = self.transport.membership().or_else(|| self.membership.clone()) else { return };
+        let Some(grant) = self.access.as_ref().and_then(|access| access.grant_for(&self.author)) else { return };
+        if grant.expires_ms > now.saturating_add(EXTEND_BEFORE_MS) {
+            return;
+        }
+        if self.extend_membership.as_deref() != Some(membership.as_str()) {
+            self.extend_membership = Some(membership.clone());
+            self.extend_attempts = 0;
+        }
+        if self.extend_attempts >= MAX_ATTEMPTS || (self.extend_attempts > 0 && now.saturating_sub(self.last_extend_ms) < EXTEND_RETRY_MS) {
+            return;
+        }
+        self.extend_attempts += 1;
+        self.last_extend_ms = now;
+        self.membership = Some(membership.clone());
+        let name = self.name.clone();
+        self.send(Kind::JoinRequest { token: None, name, membership: Some(membership) });
+    }
+
     /// The host judges a join request: a valid token, or a live membership
     /// of the shared realm, admits (at once when auto-approving, else queued
     /// for the host's yes); anything else is refused and counted.
@@ -575,9 +621,22 @@ impl CollabSession {
             self.unauthorized += 1;
             return;
         };
+        // A holder of a live grant presenting a renewed membership: the host
+        // admitted this person once, so the grant is extended without asking
+        // again, keeping its role, and only when it then ends later.
+        let live = self.access.as_ref().and_then(|access| access.grant_for(author)).filter(|grant| grant.is_live(now)).cloned();
+        if let (Some(current), Some(ends)) = (live, ends_ms) {
+            let extended_end = now.saturating_add(GRANT_TTL_MS).min(ends);
+            if extended_end > current.expires_ms {
+                self.issue_grant(author, current.role, now, Some(ends));
+            }
+            return;
+        }
         // The person at the door is someone we have met: remember them.
         self.note_contact(author, name, None);
-        if self.auto_approve {
+        // A holder the host revoked comes back only with the host's yes.
+        let revoked = self.access.as_ref().is_some_and(|access| access.was_revoked(author));
+        if self.auto_approve && !revoked {
             self.issue_grant(author, role, now, ends_ms);
         } else {
             self.pending.insert(author.to_string(), PendingJoin { name: name.to_string(), role, ends_ms });
