@@ -166,7 +166,9 @@ pub trait GrantVerifier: Send + Sync {
     /// host id it derives, the version and the expiry.
     fn verify(&self, signed: &SignedGrant, now_ms: u64) -> Result<Grant, String>;
 
-    /// Verifies a revocation the same way (under the revocation context).
+    /// Verifies a revocation the same way (under the revocation context),
+    /// except that a revocation never expires: it must verify at any later
+    /// `now_ms`, since the grants store re-verifies it on every load.
     fn verify_revocation(&self, signed: &SignedRevocation, now_ms: u64) -> Result<Revocation, String>;
 }
 
