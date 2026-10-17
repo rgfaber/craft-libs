@@ -423,6 +423,12 @@ impl Access {
         self.revoked.contains_key(holder)
     }
 
+    /// When the host last revoked `holder` (the revocation's `issued_ms`),
+    /// if ever: a per-person invite minted after it is the host's yes.
+    pub fn revoked_at(&self, holder: &str) -> Option<u64> {
+        self.revoked.get(holder).copied()
+    }
+
     /// The holder ids, sorted (the UI's People list).
     pub fn holder_ids(&self) -> Vec<String> {
         self.holders.keys().cloned().collect()

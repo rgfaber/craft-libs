@@ -606,9 +606,8 @@ impl CollabSession {
             return; // not the host: only the host admits
         }
         let now = now_ms();
-        let by_token = token
-            .and_then(|token| self.access.as_ref().and_then(|access| access.check_token_for(token, author, now).ok()))
-            .map(|checked| (checked.role, None));
+        let checked = token.and_then(|token| self.access.as_ref().and_then(|access| access.check_token_for(token, author, now).ok()));
+        let by_token = checked.as_ref().map(|checked| (checked.role, None));
         // The verifier holds the realm's key and the host's role mapping;
         // the audience check pins the caller, and the membership's own end
         // caps any grant issued on it.
@@ -636,8 +635,12 @@ impl CollabSession {
         }
         // The person at the door is someone we have met: remember them.
         self.note_contact(author, name, None);
-        // A holder the host revoked comes back only with the host's yes.
-        let revoked = self.access.as_ref().is_some_and(|access| access.was_revoked(author));
+        // A holder the host revoked comes back only with the host's yes: a
+        // per-person invite (pinned to this node by check_token_for) minted
+        // after the revoke is that yes; an open one, or one from before the
+        // revoke, waits.
+        let reinvited_after = |at: u64| checked.as_ref().is_some_and(|token| !token.is_open() && token.issued_ms > at);
+        let revoked = self.access.as_ref().and_then(|access| access.revoked_at(author)).is_some_and(|at| !reinvited_after(at));
         if self.auto_approve && !revoked {
             self.issue_grant(author, role, now, ends_ms);
         } else {

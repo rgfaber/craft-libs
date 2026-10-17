@@ -562,3 +562,46 @@ fn a_holder_the_host_revoked_is_never_readmitted_without_the_host() {
     assert!(h.collab.holders().is_empty(), "no grant without the host");
     assert_eq!(h.collab.pending(), vec![("bbbbbbbb".to_string(), "Bea".to_string())], "the host decides");
 }
+
+#[test]
+fn a_per_person_invite_minted_after_the_revoke_is_the_hosts_yes() {
+    let bob_id = "bb".repeat(32);
+    let mut bus = MemoryTransport::bus(&[HOST, &bob_id, &bob_id, &bob_id, &bob_id]);
+    let (ta, tb, mut tb_open, mut tb_old, mut tb_new) = (bus.remove(0), bus.remove(0), bus.remove(0), bus.remove(0), bus.remove(0));
+    let mut h = host(ta, "doc", true);
+    let mut bob = joiner(tb, "Bob", Some(token(HOST, Role::Editor)), None);
+    admit(&mut h, &mut bob);
+    let before_revoke = TestIssuer { host: HOST.into() }.issue("demo", &bob_id, Role::Editor, 60_000, now_ms()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    h.collab.revoke(&bob_id).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+
+    // An open invite still waits for the host.
+    tb_open.poll();
+    let mut open = joiner(tb_open, "Bob", Some(token(HOST, Role::Editor)), None);
+    open.tick();
+    h.tick();
+    assert!(h.collab.holders().is_empty(), "no grant without the host");
+    assert_eq!(h.collab.pending().len(), 1, "the host decides");
+
+    // So does Bob replaying a per-person invite from before the revoke.
+    // (A session made in the same millisecond shares an epoch.)
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    tb_old.poll();
+    let mut old = joiner(tb_old, "Bob", Some(before_revoke), None);
+    old.tick();
+    h.tick();
+    assert!(h.collab.holders().is_empty(), "no grant without the host");
+    assert_eq!(h.collab.pending().len(), 1, "the host decides");
+
+    // A per-person invite the host minted after the revoke is that yes.
+    let share = ShareContext { realm: "cc".repeat(32), realm_key: String::new(), seed: "station.example:4433:dd".into(), profile: "pq_pure".into() };
+    let line = h.collab.mint_invite_for(Some(&share), None, &bob_id, "Bob", Role::Viewer, 60_000).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    tb_new.poll();
+    let mut invited = joiner(tb_new, "Bob", Invite::decode(&line).unwrap().token, None);
+    admit(&mut h, &mut invited);
+    assert_eq!(invited.doc, "doc", "admitted at once");
+    assert_eq!(h.collab.holders().len(), 1);
+    assert!(h.collab.pending().is_empty(), "and no longer pending");
+}
