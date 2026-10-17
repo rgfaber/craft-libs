@@ -679,7 +679,11 @@ impl CollabSession {
     pub fn revoke(&mut self, node: &str) -> Result<(), String> {
         let now = now_ms();
         let Some(issuer) = self.issuer.as_ref() else { return Err("this session is not the host".into()) };
-        let signed = issuer.revoke(&self.doc, node, now)?;
+        // Signed later than the grant it ends: a host whose clock stepped
+        // back since that grant was issued would otherwise sign a revocation
+        // that ends nothing, while the host is told the holder is revoked.
+        let granted = self.access.as_ref().and_then(|access| access.grant_for(node)).map(|grant| grant.issued_ms.saturating_add(1));
+        let signed = issuer.revoke(&self.doc, node, granted.map_or(now, |granted| granted.max(now)))?;
         self.send(Kind::Revoked { revocation: signed.clone() });
         if let Some(access) = self.access.as_mut() {
             let _ = access.revoke(&signed, now);

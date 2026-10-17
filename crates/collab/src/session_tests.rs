@@ -637,3 +637,20 @@ fn a_revoke_survives_the_host_restarting() {
     assert!(restarted.collab.holders().is_empty(), "no grant without the host");
     assert_eq!(restarted.collab.pending(), vec![("bbbbbbbb".to_string(), "Bob".to_string())], "the host decides");
 }
+
+#[test]
+fn a_revoke_ends_a_grant_issued_after_the_hosts_clock_stepped_back() {
+    let (ta, _tb) = pair();
+    let mut h = host(ta, "doc", true);
+    // The grant was issued before the host's clock stepped back four minutes
+    // (within the grants' clock tolerance, so it is live and installs).
+    let ahead = now_ms() + 4 * 60 * 1_000;
+    let grant = TestIssuer { host: HOST.into() }.issue("demo", "bbbbbbbb", Role::Editor, 3_600_000, ahead).unwrap();
+    assert!(h.collab.access.as_mut().unwrap().install(&grant, now_ms()).is_ok());
+    assert_eq!(h.collab.holders(), vec!["bbbbbbbb".to_string()]);
+
+    h.collab.revoke("bbbbbbbb").unwrap();
+    assert!(h.collab.holders().is_empty(), "the revoke ends the grant it was meant to end");
+    let at = h.collab.access.as_ref().unwrap().revoked_at("bbbbbbbb").unwrap();
+    assert!(at > ahead, "and is newer than it, so the grant cannot install again");
+}

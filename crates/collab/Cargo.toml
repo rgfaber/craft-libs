@@ -5,7 +5,8 @@ description = "A collaboration seam for document apps: signed ops, grants and in
 # 0.5.2: a realm member's grant is extended while the membership renews; a revoked holder waits for the host.
 # 0.5.3: a per-person invite minted after a revoke is the host's yes (Access::revoked_at).
 # 0.5.4: the grants store keeps the revocations, so a revoke survives a restart; the store is now {grants, revocations}, and a bare grant array (0.5.3 and earlier) is not read.
-version = "0.5.4"
+# 0.5.5: the host's revoke is signed later than the grant it ends, so it works after the host's clock stepped back.
+version = "0.5.5"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/rgfaber/craft-libs"
