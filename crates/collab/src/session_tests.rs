@@ -588,11 +588,11 @@ fn a_per_person_invite_minted_after_the_revoke_is_the_hosts_yes() {
     // (A session made in the same millisecond shares an epoch.)
     std::thread::sleep(std::time::Duration::from_millis(3));
     tb_old.poll();
-    let mut old = joiner(tb_old, "Bob", Some(before_revoke), None);
+    let mut old = joiner(tb_old, "Bob again", Some(before_revoke), None);
     old.tick();
     h.tick();
     assert!(h.collab.holders().is_empty(), "no grant without the host");
-    assert_eq!(h.collab.pending().len(), 1, "the host decides");
+    assert_eq!(h.collab.pending(), vec![(bob_id.clone(), "Bob again".to_string())], "the host decides");
 
     // A per-person invite the host minted after the revoke is that yes.
     let share = ShareContext { realm: "cc".repeat(32), realm_key: String::new(), seed: "station.example:4433:dd".into(), profile: "pq_pure".into() };
