@@ -653,4 +653,10 @@ fn a_revoke_ends_a_grant_issued_after_the_hosts_clock_stepped_back() {
     assert!(h.collab.holders().is_empty(), "the revoke ends the grant it was meant to end");
     let at = h.collab.access.as_ref().unwrap().revoked_at("bbbbbbbb").unwrap();
     assert!(at > ahead, "and is newer than it, so the grant cannot install again");
+
+    // The host changes its mind before its clock passes the revocation: the
+    // new grant is minted later than it, so it installs.
+    h.collab.pending.insert("bbbbbbbb".into(), PendingJoin { name: "Bob".into(), role: Role::Editor, ends_ms: None });
+    h.collab.approve("bbbbbbbb").unwrap();
+    assert_eq!(h.collab.holders(), vec!["bbbbbbbb".to_string()], "the host's later yes is not swallowed");
 }

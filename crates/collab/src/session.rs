@@ -697,14 +697,19 @@ impl CollabSession {
     /// it. `ends_ms` is the membership's own end when the admission was one:
     /// the grant never outlives it.
     fn issue_grant(&mut self, holder: &str, role: Role, now: u64, ends_ms: Option<u64>) {
+        // Minted later than the holder's revocation: after the host's clock
+        // stepped back, a grant at `now` would be older than it, refused by
+        // every replica while the host's yes looked accepted.
+        let revoked = self.access.as_ref().and_then(|access| access.revoked_at(holder)).map(|at| at.saturating_add(1));
+        let at = revoked.map_or(now, |after| after.max(now));
         let ttl_ms = match ends_ms {
-            Some(ends) => GRANT_TTL_MS.min(ends.saturating_sub(now)),
+            Some(ends) => GRANT_TTL_MS.min(ends.saturating_sub(at)),
             None => GRANT_TTL_MS,
         };
         if ttl_ms == 0 {
             return; // nothing left of the membership: nothing to grant
         }
-        let Some(issued) = self.issuer.as_ref().and_then(|issuer| issuer.issue(&self.doc, holder, role, ttl_ms, now).ok()) else { return };
+        let Some(issued) = self.issuer.as_ref().and_then(|issuer| issuer.issue(&self.doc, holder, role, ttl_ms, at).ok()) else { return };
         self.send(Kind::GrantIssued { grant: issued.clone() });
         if let Some(access) = self.access.as_mut() {
             let _ = access.install(&issued, now);
