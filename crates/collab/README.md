@@ -30,7 +30,8 @@ What the seam owns, independent of any network:
   keeping its role (a person the host invited as an editor stays one) and never shortening it. A member the realm stops admitting loses the
   document when its last token ends, plus the grants' 5 minutes of clock tolerance. A holder
   the host revoked is never readmitted without the host's yes, even under auto-approve; a
-  per-person invite the host mints for them after the revoke is that yes.
+  per-person invite the host mints for them after the revoke is that yes. The grants store
+  keeps the revocations beside the grants, so a revoke holds across a restart.
 - **Invites**: one copyable line, signed by the host over every field.
 - **Contacts**: the people a device has met.
 - **The shared session**: `CollabSession` runs one shared document's protocol (join and

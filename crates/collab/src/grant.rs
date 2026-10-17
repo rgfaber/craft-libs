@@ -218,9 +218,10 @@ pub struct Access {
     /// The signed grants as installed, so a restarted peer can re-learn its
     /// holders without new signatures from the host.
     signed: BTreeMap<String, SignedGrant>,
-    /// Revocations by holder: the highest `issued_ms` revoked; a grant no
-    /// newer than this cannot install, a newer one is the host re-inviting.
-    revoked: BTreeMap<String, u64>,
+    /// Revocations by holder: the signed one with the highest `issued_ms`; a
+    /// grant no newer than it cannot install, a newer one is the host
+    /// re-inviting. Kept signed so a restarted peer re-learns it too.
+    revoked: BTreeMap<String, SignedRevocation>,
 }
 
 /// What an access check found.
@@ -283,7 +284,7 @@ impl Access {
         if grant.is_open() {
             return Err("an open token is not a holder grant".into());
         }
-        if self.revoked.get(&grant.holder).is_some_and(|at| grant.issued_ms <= *at) {
+        if self.revoked_at(&grant.holder).is_some_and(|at| grant.issued_ms <= at) {
             return Err("the holder was revoked after this grant was issued".into());
         }
         self.install_newer(grant, signed.clone())
@@ -337,8 +338,9 @@ impl Access {
         if revocation.host != self.host {
             return Err("the revocation names another host".into());
         }
-        let entry = self.revoked.entry(revocation.holder.clone()).or_insert(0);
-        *entry = (*entry).max(revocation.issued_ms);
+        if self.revoked_at(&revocation.holder).is_none_or(|at| revocation.issued_ms > at) {
+            self.revoked.insert(revocation.holder.clone(), signed.clone());
+        }
         if self.holders.get(&revocation.holder).is_some_and(|grant| grant.issued_ms <= revocation.issued_ms) {
             self.holders.remove(&revocation.holder);
             self.signed.remove(&revocation.holder);
@@ -426,7 +428,13 @@ impl Access {
     /// When the host last revoked `holder` (the revocation's `issued_ms`),
     /// if ever: a per-person invite minted after it is the host's yes.
     pub fn revoked_at(&self, holder: &str) -> Option<u64> {
-        self.revoked.get(holder).copied()
+        self.revoked.get(holder).map(|signed| signed.revocation.issued_ms)
+    }
+
+    /// The signed revocations, the latest per holder, for persisting beside
+    /// [`Access::signed_grants`].
+    pub fn signed_revocations(&self) -> Vec<SignedRevocation> {
+        self.revoked.values().cloned().collect()
     }
 
     /// The holder ids, sorted (the UI's People list).

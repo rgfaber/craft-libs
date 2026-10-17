@@ -321,7 +321,8 @@ fn a_member_grant_never_outlives_the_membership() {
     bea.tick();
     h.tick();
     h.collab.approve("bbbbbbbb").unwrap();
-    let stored: Vec<SignedGrant> = serde_json::from_str(&grants.read().unwrap_or_default()).unwrap();
+    let saved: Value = serde_json::from_str(&grants.read().unwrap_or_default()).unwrap();
+    let stored: Vec<SignedGrant> = serde_json::from_value(saved["grants"].clone()).unwrap();
     let grant = &stored[0].grant;
     assert_eq!(grant.role, Role::Editor);
     assert!(grant.expires_ms <= membership_end, "capped at the membership's end");
@@ -604,4 +605,35 @@ fn a_per_person_invite_minted_after_the_revoke_is_the_hosts_yes() {
     assert_eq!(invited.doc, "doc", "admitted at once");
     assert_eq!(h.collab.holders().len(), 1);
     assert!(h.collab.pending().is_empty(), "and no longer pending");
+}
+
+#[test]
+fn a_revoke_survives_the_host_restarting() {
+    let grants = MemStore::default();
+    let invite = token(HOST, Role::Editor);
+    let mut bus = MemoryTransport::bus(&[HOST, "bbbbbbbb", HOST, "bbbbbbbb"]);
+    let (ta, tb, ta_again, tb_again) = (bus.remove(0), bus.remove(0), bus.remove(0), bus.remove(0));
+    {
+        let mut h = host(ta, "doc", true);
+        h.collab.set_grants_store(Box::new(grants.clone()));
+        let mut bob = joiner(tb, "Bob", Some(invite.clone()), None);
+        admit(&mut h, &mut bob);
+        assert_eq!(h.collab.holders(), vec!["bbbbbbbb".to_string()]);
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        h.collab.revoke("bbbbbbbb").unwrap();
+    }
+
+    // The host reopens the document from the same store, and Bob presents
+    // the open invite he joined with, still live.
+    std::thread::sleep(std::time::Duration::from_millis(3));
+    let mut restarted = host(ta_again, "doc", true);
+    restarted.collab.set_grants_store(Box::new(grants));
+    assert!(restarted.collab.holders().is_empty(), "the revoked grant does not come back");
+    let mut tb_again = tb_again;
+    tb_again.poll();
+    let mut again = joiner(tb_again, "Bob", Some(invite), None);
+    again.tick();
+    restarted.tick();
+    assert!(restarted.collab.holders().is_empty(), "no grant without the host");
+    assert_eq!(restarted.collab.pending(), vec![("bbbbbbbb".to_string(), "Bob".to_string())], "the host decides");
 }

@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{Value, json};
 
 use crate::contacts::{Contact, Contacts};
-use crate::grant::{Access, GrantIssuer, MembershipVerifier, Role, SignedGrant};
+use crate::grant::{Access, GrantIssuer, MembershipVerifier, Role, SignedGrant, SignedRevocation};
 use crate::invite::{INVITE_VERSION, Invite};
 use crate::message::{Kind, Message};
 use crate::order::OrderBuffer;
@@ -108,6 +108,14 @@ struct PendingJoin {
     /// The membership's own end, when the admission was one: the grant
     /// never outlives it.
     ends_ms: Option<u64>,
+}
+
+/// What the grants store holds: the installed grants and the latest
+/// revocation per holder, all host-signed and verified again on load.
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedAccess {
+    grants: Vec<SignedGrant>,
+    revocations: Vec<SignedRevocation>,
 }
 
 /// One shared document session. See the module docs.
@@ -339,16 +347,21 @@ impl CollabSession {
         self.awaiting_snapshot
     }
 
-    /// Persists the installed grants in `store`, and installs what it
-    /// holds: a restarted host relearns its holders and a restarted holder
-    /// its own grant. Malformed or unverifiable entries are skipped.
+    /// Persists the installed grants and the revocations in `store`, and
+    /// applies what it holds: a restarted host relearns its holders and whom
+    /// it revoked, a restarted holder its own grant. The revocations go
+    /// first, so a revoked grant cannot install. Malformed or unverifiable
+    /// entries are skipped.
     pub fn set_grants_store(&mut self, store: Box<dyn TextStore>) {
         let now = now_ms();
         if let Some(text) = store.read()
-            && let Ok(grants) = serde_json::from_str::<Vec<SignedGrant>>(&text)
+            && let Ok(saved) = serde_json::from_str::<SavedAccess>(&text)
             && let Some(access) = self.access.as_mut()
         {
-            for signed in &grants {
+            for signed in &saved.revocations {
+                let _ = access.revoke(signed, now);
+            }
+            for signed in &saved.grants {
                 let _ = access.install(signed, now);
             }
         }
@@ -365,7 +378,8 @@ impl CollabSession {
 
     fn save_grants(&self) {
         let (Some(store), Some(access)) = (self.grants_store.as_ref(), self.access.as_ref()) else { return };
-        if let Ok(json) = serde_json::to_string(&access.signed_grants()) {
+        let saved = SavedAccess { grants: access.signed_grants(), revocations: access.signed_revocations() };
+        if let Ok(json) = serde_json::to_string(&saved) {
             store.write(&json);
         }
     }
@@ -671,6 +685,7 @@ impl CollabSession {
             let _ = access.revoke(&signed, now);
         }
         self.pending.remove(node);
+        self.save_grants();
         Ok(())
     }
 
