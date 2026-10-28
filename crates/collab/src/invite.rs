@@ -13,8 +13,12 @@ use crate::grant::{Role, SignedGrant};
 /// and added the realm-member role: a realm invite carries no token and is
 /// admitted by a live membership instead; 4 names that membership's realm
 /// (`member_realm`, which may differ from the transport's `realm`: a host in
-/// realm H sharing with the members of realm E) and the host's own realm.
-pub const INVITE_VERSION: u32 = 4;
+/// realm H sharing with the members of realm E) and the host's own realm;
+/// 5 names the sealed group the session's document travels under (`group`)
+/// and the credential that pulls its key (`group_grant`), so a joiner can
+/// pull the key before it knocks — a joiner with no key cannot publish a
+/// sealed join request, and a clear knock would leak the document.
+pub const INVITE_VERSION: u32 = 5;
 
 /// The signature context for invites.
 pub const INVITE_CONTEXT: &[u8] = b"craft-collab/invite/v1";
@@ -46,6 +50,19 @@ pub struct Invite {
     pub profile: String,
     /// One seed station, `host:port:node_hex`.
     pub seed: String,
+    /// The sealed group this session's document travels under: a random id
+    /// minted by the transport when the host starts sharing, **never derived
+    /// from the document** (a derived one would put the document's permanent
+    /// id in the clear on every topic). Empty when the transport does not
+    /// seal — a plain build, and `MemoryTransport`.
+    #[serde(default)]
+    pub group: String,
+    /// What the joiner presents to pull that group's key. Opaque to the
+    /// seam: the transport mints it with the open token, and on the mesh it
+    /// is a UCAN for the distributor's `group_keys_v1`. Empty when the
+    /// transport does not seal.
+    #[serde(default)]
+    pub group_grant: String,
     pub issued_ms: u64,
     pub expires_ms: u64,
     /// The host-signed open token the joiner presents; a realm invite
@@ -93,6 +110,8 @@ struct InviteBody<'a> {
     realm_key: &'a str,
     profile: &'a str,
     seed: &'a str,
+    group: &'a str,
+    group_grant: &'a str,
     issued_ms: u64,
     expires_ms: u64,
     token: Option<&'a SignedGrant>,
@@ -116,6 +135,8 @@ impl Invite {
             realm_key: &self.realm_key,
             profile: &self.profile,
             seed: &self.seed,
+            group: &self.group,
+            group_grant: &self.group_grant,
             issued_ms: self.issued_ms,
             expires_ms: self.expires_ms,
             token: self.token.as_ref(),
@@ -142,6 +163,11 @@ impl Invite {
         if invite.v != INVITE_VERSION {
             return Err(format!("unsupported invite version {}", invite.v));
         }
+        // A group id is hex when there is one; the seam does not mint it and
+        // cannot check it is random, only that the transport named it.
+        if !invite.group.is_empty() && (!invite.group.len().is_multiple_of(2) || !invite.group.chars().all(|c| c.is_ascii_hexdigit())) {
+            return Err("an invite's group is hex characters".into());
+        }
         Ok(invite)
     }
 
@@ -167,6 +193,8 @@ mod tests {
             realm_key: "ee".repeat(32),
             profile: "pq_hybrid".into(),
             seed: "station.example:4433:dd".repeat(32),
+            group: "ff".repeat(16),
+            group_grant: "ucan-for-the-group".into(),
             issued_ms: 100,
             expires_ms: 200,
             token: Some(SignedGrant {
@@ -265,6 +293,43 @@ mod tests {
         old.v = 3;
         let line = serde_json::to_string(&old).expect("json");
         assert!(Invite::decode(&line).is_err(), "v3 names no member realm; a host must re-mint");
+    }
+
+    #[test]
+    fn a_version_4_invite_is_refused() {
+        let mut old = invite();
+        old.v = 4;
+        let line = serde_json::to_string(&old).expect("json");
+        assert!(Invite::decode(&line).is_err(), "v4 names no sealed group; a host must re-mint");
+    }
+
+    /// The joiner pulls the group's key before it knocks, so the group and
+    /// the credential that pulls its key travel in the signed envelope.
+    #[test]
+    fn the_group_and_its_grant_are_signed_and_hex_checked() {
+        let base = invite().signed_bytes().expect("bytes");
+        let mut tampered = invite();
+        tampered.group = "ee".repeat(16);
+        assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the group is covered");
+        let mut tampered = invite();
+        tampered.group_grant = "another-ucan".into();
+        assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the credential is covered");
+
+        let back = Invite::decode(&invite().encode().expect("encode")).expect("decode");
+        assert_eq!(back.group, "ff".repeat(16));
+        assert_eq!(back.group_grant, "ucan-for-the-group");
+
+        let mut not_hex = invite();
+        not_hex.group = "the document id".into();
+        let line = serde_json::to_string(&not_hex).expect("json");
+        assert!(Invite::decode(&line).is_err(), "a group id is hex, not prose");
+
+        // A transport that does not seal names no group and carries no credential.
+        let mut plain = invite();
+        plain.group = String::new();
+        plain.group_grant = String::new();
+        let back = Invite::decode(&plain.encode().expect("encode")).expect("decode");
+        assert!(back.group.is_empty() && back.group_grant.is_empty());
     }
 
     #[test]

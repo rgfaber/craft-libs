@@ -335,7 +335,13 @@ fn an_invite_for_one_person_admits_only_that_node() {
     let mut bus = MemoryTransport::bus(&[HOST, &bob_id, &carol_id]);
     let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
     let mut h = host(ta, "for one", true);
-    let share = ShareContext { realm: "cc".repeat(32), realm_key: String::new(), seed: "station.example:4433:dd".into(), profile: "pq_pure".into() };
+    let share = ShareContext {
+        realm: "cc".repeat(32),
+        realm_key: String::new(),
+        seed: "station.example:4433:dd".into(),
+        profile: "pq_pure".into(),
+        group: String::new(),
+    };
     let line = h.collab.mint_invite_for(Some(&share), None, &bob_id, "Bob", Role::Editor, 60_000).unwrap();
     let invite = Invite::decode(&line).unwrap();
     assert_eq!(invite.invitee.as_deref(), Some(bob_id.as_str()));
@@ -358,7 +364,13 @@ fn a_realm_invite_names_the_shared_realm_and_the_hosts_own() {
     let mut h = host(MemoryTransport::pair(HOST, "x").0, "doc", true);
     assert!(!h.collab.can_invite(), "no mesh coordinates yet");
     assert!(h.collab.mint_realm_invite(None, None, 60_000).is_err(), "not shared with a realm");
-    h.collab.set_share_context(ShareContext { realm: "r".into(), realm_key: "k".into(), seed: "s".into(), profile: "p".into() });
+    h.collab.set_share_context(ShareContext {
+        realm: "r".into(),
+        realm_key: "k".into(),
+        seed: "s".into(),
+        profile: "p".into(),
+        group: String::new(),
+    });
     h.collab.set_member_verifier(Box::new(TestMemberVerifier { accepts: "m".into(), role: Role::Viewer, ends_ms: None }));
     assert!(h.collab.can_invite());
     let invite = Invite::decode(&h.collab.mint_realm_invite(None, Some("io.macula"), 60_000).unwrap()).unwrap();
@@ -596,7 +608,13 @@ fn a_per_person_invite_minted_after_the_revoke_is_the_hosts_yes() {
     assert_eq!(h.collab.pending(), vec![(bob_id.clone(), "Bob again".to_string())], "the host decides");
 
     // A per-person invite the host minted after the revoke is that yes.
-    let share = ShareContext { realm: "cc".repeat(32), realm_key: String::new(), seed: "station.example:4433:dd".into(), profile: "pq_pure".into() };
+    let share = ShareContext {
+        realm: "cc".repeat(32),
+        realm_key: String::new(),
+        seed: "station.example:4433:dd".into(),
+        profile: "pq_pure".into(),
+        group: String::new(),
+    };
     let line = h.collab.mint_invite_for(Some(&share), None, &bob_id, "Bob", Role::Viewer, 60_000).unwrap();
     std::thread::sleep(std::time::Duration::from_millis(3));
     tb_new.poll();

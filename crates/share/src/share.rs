@@ -278,6 +278,8 @@ mod tests {
             realm_key: String::new(),
             profile: "pq_hybrid".into(),
             seed: "station.example:4433:dd".into(),
+            group: String::new(),
+            group_grant: String::new(),
             issued_ms: 1,
             expires_ms: 2,
             token: None,

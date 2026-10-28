@@ -207,6 +207,15 @@ pub trait GrantIssuer: Send + Sync {
     /// Signs raw envelope bytes as the host (the invite envelope and
     /// whatever else the seam signs later).
     fn sign(&self, bytes: &[u8]) -> Result<Vec<u8>, String>;
+    /// The credential a joiner presents to pull the key of the sealed group
+    /// `group`, minted with the open token for the same `ttl_ms`. Opaque to
+    /// the seam: on the mesh it is a UCAN for the distributor's
+    /// `group_keys_v1`, and its lifetime never outlives the grant it travels
+    /// with. Empty by default, which is what a transport that does not seal
+    /// returns — a plain build and `MemoryTransport` both.
+    fn group_grant(&self, _doc: &str, _group: &str, _ttl_ms: u64, _now_ms: u64) -> Result<String, String> {
+        Ok(String::new())
+    }
 }
 
 /// Who may act on this document, as every replica checks it: the host, plus

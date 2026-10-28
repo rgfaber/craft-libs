@@ -99,6 +99,11 @@ pub struct ShareContext {
     pub realm_key: String,
     pub seed: String,
     pub profile: String,
+    /// The sealed group this session's document travels under: a random id
+    /// the transport mints when the host starts sharing, never derived from
+    /// the document. Empty when the transport does not seal (a plain build,
+    /// and `MemoryTransport`), and then the invite carries no group either.
+    pub group: String,
 }
 
 /// A join request waiting for the host's yes.
@@ -784,6 +789,14 @@ impl CollabSession {
             realm_key: share.realm_key.clone(),
             profile: share.profile.clone(),
             seed: share.seed.clone(),
+            // The group the joiner pulls a key for before it knocks, and the
+            // credential it presents: both minted with the open token, both
+            // empty on a transport that does not seal.
+            group_grant: match share.group.is_empty() {
+                true => String::new(),
+                false => issuer.group_grant(&self.doc, &share.group, ttl_ms, now)?,
+            },
+            group: share.group.clone(),
             issued_ms: now,
             expires_ms: now.saturating_add(ttl_ms),
             token: if realm_members { None } else { Some(token) },
