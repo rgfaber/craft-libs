@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
@@ -12,15 +12,14 @@ repository = "https://github.com/echelon/craft-libs"
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 # the collaboration seam, published as macula-craft-seam; code keeps `craft_collab`
-# The seam is on 0.6.0 in this workspace, but macula-craft-share 0.5.0 is published
-# against the 0.5 line and its `cargo publish --dry-run` (the CI gate) resolves its
-# dependencies from the registry, where 0.6.0 does not exist until the seam's tag
-# publishes. The range keeps both true: the path crate 0.6.0 satisfies it here, and
-# the registry's newest 0.5.x satisfies it there. Pin it to `0.6` in the share
-# crate's own next release, once 0.6.0 is on the registry.
-craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = ">=0.5, <0.7" }
+# Pinned to 0.6 now that the seam's own tag has published it (0.6.0 on the registry,
+# 2026-10-28): a share built here is built against invite v5, which is what carries
+# the sealed group's prefix and the credential that pulls its key. The range was
+# wide (`>=0.5, <0.7`) only while 0.6.0 had not reached the registry and the share
+# crate's `cargo publish --dry-run` gate had to resolve against it.
+craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.6" }
 # the share and sign-in windows, published as macula-craft-share; code keeps `craft_share`
-craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.5" }
+craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.6" }
 
 # shared dependencies of the craft libraries
 serde = { version = "1", features = ["derive"] }

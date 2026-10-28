@@ -23,6 +23,17 @@ pub struct ShareState {
     pub status: Option<String>,
 }
 
+/// Why the open invite line is not offered, when it is not: a sealed share's
+/// document key goes to named people, one invite each, so a line anyone could
+/// copy would be the key handed out in the open. The seam refuses to mint one
+/// (`an open invite cannot be sealed: invite people by name`); this window says
+/// so before the button is pressed rather than after.
+pub fn open_invite_refusal(sealed: bool) -> Option<&'static str> {
+    sealed.then_some(
+        "This share is sealed: its key goes to named people, one invite each. Use “For one person” below — a line anyone could copy could not carry the key.",
+    )
+}
+
 /// What a pasted invite asks of the joiner, before Join is pressed: who
 /// sent it (and the realm they claim), and for a realm invite which of the
 /// joiner's memberships joining presents. The invite's signature is checked
@@ -126,6 +137,9 @@ fn join_form(share: &mut ShareState, host: &mut dyn ShareHost, ui: &mut egui::Ui
 
 fn shared_panel(share: &mut ShareState, host: &mut dyn ShareHost, ui: &mut egui::Ui, ctx: &Context) {
     let host_realm = host.host_realm();
+    // Read before the mutable borrow below: whether this build seals decides
+    // what the invite section offers.
+    let sealed = host.sealed();
     let Some(collab) = host.collab_mut() else { return };
     let stats = collab.stats();
     let doc = stats["doc"].as_str().unwrap_or("").to_string();
@@ -140,29 +154,41 @@ fn shared_panel(share: &mut ShareState, host: &mut dyn ShareHost, ui: &mut egui:
 
     if collab.can_invite() {
         ui.add_space(6.0);
-        ui.label("Invite line (carries your signed token; valid 24 hours, editor):");
-        ui.horizontal(|ui| {
-            if ui.button("Mint and copy").clicked() {
-                match collab.mint_invite(None, host_realm.as_deref(), craft_collab::Role::Editor, INVITE_TTL_MS) {
-                    Ok(line) => {
-                        ctx.copy_text(line.clone());
-                        share.minted = Some(line);
-                        share.status = Some("Invite copied to the clipboard.".into());
+        // A sealed share goes to named people, one invite each: a line anyone
+        // holding it could use would be a key handed out in the open, and the
+        // seam refuses to mint one. The window greys the button out and says
+        // why, rather than letting the person press it and read an error.
+        if let Some(why) = open_invite_refusal(sealed) {
+            ui.add_enabled_ui(false, |ui| {
+                ui.label("Invite line (carries your signed token; valid 24 hours, editor):");
+                let _ = ui.button("Mint and copy");
+            });
+            ui.label(egui::RichText::new(why).small());
+        } else {
+            ui.label("Invite line (carries your signed token; valid 24 hours, editor):");
+            ui.horizontal(|ui| {
+                if ui.button("Mint and copy").clicked() {
+                    match collab.mint_invite(None, host_realm.as_deref(), craft_collab::Role::Editor, INVITE_TTL_MS) {
+                        Ok(line) => {
+                            ctx.copy_text(line.clone());
+                            share.minted = Some(line);
+                            share.status = Some("Invite copied to the clipboard.".into());
+                        }
+                        Err(e) => share.status = Some(format!("Could not mint an invite: {e}")),
                     }
-                    Err(e) => share.status = Some(format!("Could not mint an invite: {e}")),
                 }
+                if share.minted.is_some()
+                    && ui.button("Copy again").clicked()
+                    && let Some(line) = share.minted.clone()
+                {
+                    ctx.copy_text(line);
+                    share.status = Some("Invite copied to the clipboard.".into());
+                }
+            });
+            if let Some(line) = share.minted.clone() {
+                let mut shown = line;
+                ui.add(egui::TextEdit::multiline(&mut shown).desired_rows(2).desired_width(f32::INFINITY).interactive(false));
             }
-            if share.minted.is_some()
-                && ui.button("Copy again").clicked()
-                && let Some(line) = share.minted.clone()
-            {
-                ctx.copy_text(line);
-                share.status = Some("Invite copied to the clipboard.".into());
-            }
-        });
-        if let Some(line) = share.minted.clone() {
-            let mut shown = line;
-            ui.add(egui::TextEdit::multiline(&mut shown).desired_rows(2).desired_width(f32::INFINITY).interactive(false));
         }
         ui.add_space(4.0);
         ui.label("For one person (their node id, from contacts or their own message):");
@@ -265,7 +291,7 @@ fn shared_panel(share: &mut ShareState, host: &mut dyn ShareHost, ui: &mut egui:
 
 #[cfg(test)]
 mod tests {
-    use super::invite_preview;
+    use super::{invite_preview, open_invite_refusal};
 
     fn invite(member_realm: Option<&str>, host_realm: Option<&str>, realm_invite: bool) -> String {
         craft_collab::Invite {
@@ -292,6 +318,16 @@ mod tests {
         }
         .encode()
         .expect("encode")
+    }
+
+    /// A sealed share offers named invites only, and says why before the
+    /// button is pressed (macula-craft-collab#26, threat model decision 5/§4).
+    #[test]
+    fn a_sealed_share_offers_no_open_invite_line() {
+        let why = open_invite_refusal(true).expect("a sealed share explains itself");
+        assert!(why.contains("sealed"), "{why}");
+        assert!(why.contains("named people"), "and names the way out: {why}");
+        assert_eq!(open_invite_refusal(false), None, "an unsealed build keeps its line");
     }
 
     /// Fable round 1, item 3: a realm invite says which membership joining
