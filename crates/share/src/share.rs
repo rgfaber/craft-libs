@@ -137,10 +137,11 @@ fn join_form(share: &mut ShareState, host: &mut dyn ShareHost, ui: &mut egui::Ui
 
 fn shared_panel(share: &mut ShareState, host: &mut dyn ShareHost, ui: &mut egui::Ui, ctx: &Context) {
     let host_realm = host.host_realm();
-    // Read before the mutable borrow below: whether this build seals decides
-    // what the invite section offers.
-    let sealed = host.sealed();
     let Some(collab) = host.collab_mut() else { return };
+    // Whether the share is sealed is the session's own answer, and it is the
+    // one minting consults: the window offers exactly what the seam would
+    // mint, and greys the line exactly when the seam would refuse it.
+    let sealed = collab.sealed();
     let stats = collab.stats();
     let doc = stats["doc"].as_str().unwrap_or("").to_string();
     let state = if stats["awaitingGrant"].as_bool().unwrap_or(false) {
@@ -322,12 +323,36 @@ mod tests {
 
     /// A sealed share offers named invites only, and says why before the
     /// button is pressed (macula-craft-collab#26, threat model decision 5/§4).
+    /// The answer is the session's, so the window cannot disagree with minting
+    /// (Neptunus r=1).
     #[test]
     fn a_sealed_share_offers_no_open_invite_line() {
-        let why = open_invite_refusal(true).expect("a sealed share explains itself");
+        let context = |group: &str| craft_collab::ShareContext {
+            realm: "cc".repeat(32),
+            realm_key: String::new(),
+            seed: "station.example:4433:dd".into(),
+            profile: "pq_hybrid".into(),
+            group: group.to_string(),
+        };
+        let mut sealed = craft_collab::CollabSession::host(
+            "doc",
+            "Hana",
+            Box::new(craft_collab::MemoryTransport::pair(&"aa".repeat(32), &"bb".repeat(32)).0),
+            &[],
+        );
+        sealed.set_share_context(context("io.macula/~aa/craft/9f9f9f9f"));
+        let why = open_invite_refusal(sealed.sealed()).expect("a sealed share explains itself");
         assert!(why.contains("sealed"), "{why}");
         assert!(why.contains("named people"), "and names the way out: {why}");
-        assert_eq!(open_invite_refusal(false), None, "an unsealed build keeps its line");
+
+        let mut plain = craft_collab::CollabSession::host(
+            "doc",
+            "Hana",
+            Box::new(craft_collab::MemoryTransport::pair(&"aa".repeat(32), &"bb".repeat(32)).0),
+            &[],
+        );
+        plain.set_share_context(context(""));
+        assert_eq!(open_invite_refusal(plain.sealed()), None, "a share that does not seal keeps its line");
     }
 
     /// Fable round 1, item 3: a realm invite says which membership joining

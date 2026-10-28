@@ -12,12 +12,12 @@ repository = "https://github.com/echelon/craft-libs"
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 # the collaboration seam, published as macula-craft-seam; code keeps `craft_collab`
-# Pinned to 0.6 now that the seam's own tag has published it (0.6.0 on the registry,
-# 2026-10-28): a share built here is built against invite v5, which is what carries
-# the sealed group's prefix and the credential that pulls its key. The range was
-# wide (`>=0.5, <0.7`) only while 0.6.0 had not reached the registry and the share
-# crate's `cargo publish --dry-run` gate had to resolve against it.
-craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.6" }
+# Pinned to 0.6.1: a share built here is built against invite v5, which is what
+# carries the sealed group's prefix and the credential that pulls its key, and
+# against `CollabSession::sealed()` (0.6.1), which is how the Share window knows
+# to grey the open line rather than offer one the seam refuses. `0.6.1` is a
+# caret range (>=0.6.1, <0.7).
+craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.6.1" }
 # the share and sign-in windows, published as macula-craft-share; code keeps `craft_share`
 craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.6" }
 

@@ -74,15 +74,6 @@ pub trait ShareHost {
         let status = self.realm_status();
         (status["signedIn"] == true).then(|| status["realm"].as_str().map(str::to_string)).flatten()
     }
-
-    /// Whether this build's shares are sealed. Every released Craft build seals
-    /// (macula-craft-collab 0.8), so the default is `true`: an app that does not
-    /// seal says so, rather than an app that does seal having to remember to.
-    /// A sealed share offers named invites only — never a line anyone could copy
-    /// — because the invite must carry the credential that pulls the share's key.
-    fn sealed(&self) -> bool {
-        true
-    }
 }
 
 /// How long an invite minted from the Share window lasts.
