@@ -27,13 +27,20 @@ fn default_profile() -> String {
     "pq_hybrid".into()
 }
 
+/// The segments a topic prefix carries: `realm`, `org`, `app`, `domain`.
+const PREFIX_SEGMENTS: usize = 4;
+
 /// Whether `s` is a topic prefix this seam will carry: `realm/org/app/domain`,
-/// at least three segments, each non-empty and free of whitespace, under 256
+/// exactly four segments, each non-empty and free of whitespace, under 256
 /// characters. The transport owns what goes in each slot; this only keeps a
-/// line of prose from arriving where a prefix belongs.
+/// line of prose from arriving where a prefix belongs, and holds the count to
+/// the four the threat model fixes so the topics the seam builds from it are
+/// the five segments `macula_topic` requires.
 fn is_topic_prefix(s: &str) -> bool {
     let segments: Vec<&str> = s.split('/').collect();
-    s.len() <= 256 && segments.len() >= 3 && segments.iter().all(|seg| !seg.is_empty() && !seg.contains(char::is_whitespace) && seg.is_ascii())
+    s.len() <= 256
+        && segments.len() == PREFIX_SEGMENTS
+        && segments.iter().all(|seg| !seg.is_empty() && !seg.contains(char::is_whitespace) && seg.is_ascii())
 }
 
 /// A host's invitation to one document.
@@ -344,6 +351,24 @@ mod tests {
         two_segments.group = "io.macula/craft".into();
         let line = serde_json::to_string(&two_segments).expect("json");
         assert!(Invite::decode(&line).is_err(), "realm, org and app at least");
+
+        // The threat model fixes the prefix at four segments, so the topic the
+        // seam builds from it is the five `macula_topic` requires: three is one
+        // short of the app, five leaves a slot nothing owns.
+        let mut three_segments = invite();
+        three_segments.group = "io.macula/~aa/craft".into();
+        let line = serde_json::to_string(&three_segments).expect("json");
+        assert!(Invite::decode(&line).is_err(), "three segments is one short");
+
+        let mut five_segments = invite();
+        five_segments.group = "io.macula/~aa/craft/9f9f9f9f/extra".into();
+        let line = serde_json::to_string(&five_segments).expect("json");
+        assert!(Invite::decode(&line).is_err(), "five segments is one too many");
+
+        let mut four_segments = invite();
+        four_segments.group = "io.macula/~aa/craft/9f9f9f9f".into();
+        let back = Invite::decode(&four_segments.encode().expect("encode")).expect("decode");
+        assert_eq!(back.group, "io.macula/~aa/craft/9f9f9f9f", "four is a prefix");
 
         let mut empty_segment = invite();
         empty_segment.group = "io.macula//craft/9f".into();
