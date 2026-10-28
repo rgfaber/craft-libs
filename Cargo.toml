@@ -12,7 +12,13 @@ repository = "https://github.com/echelon/craft-libs"
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 # the collaboration seam, published as macula-craft-seam; code keeps `craft_collab`
-craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.5" }
+# The seam is on 0.6.0 in this workspace, but macula-craft-share 0.5.0 is published
+# against the 0.5 line and its `cargo publish --dry-run` (the CI gate) resolves its
+# dependencies from the registry, where 0.6.0 does not exist until the seam's tag
+# publishes. The range keeps both true: the path crate 0.6.0 satisfies it here, and
+# the registry's newest 0.5.x satisfies it there. Pin it to `0.6` in the share
+# crate's own next release, once 0.6.0 is on the registry.
+craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = ">=0.5, <0.7" }
 # the share and sign-in windows, published as macula-craft-share; code keeps `craft_share`
 craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.5" }
 
