@@ -1,0 +1,38 @@
+name: Gate the craft libraries
+
+# There was no gate before a release tag: this repository's only workflows are
+# the two tag-triggered publishes, so a branch could reach main having run
+# nothing. These are the same commands those releases run, on every push, so a
+# handoff can cite a run on the exact tip instead of a local terminal.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  seam:
+    name: macula-craft-seam
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo test --manifest-path crates/collab/Cargo.toml --locked
+      - run: cargo clippy --manifest-path crates/collab/Cargo.toml --all-targets --locked -- -D warnings
+      - run: cargo fmt --all -- --check
+      - run: cargo publish --manifest-path crates/collab/Cargo.toml --dry-run --locked
+
+  share:
+    name: macula-craft-share
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo test -p macula-craft-share --locked
+      - run: cargo clippy -p macula-craft-share --all-targets --locked -- -D warnings
+      - run: cargo fmt --all -- --check
+      - run: cargo publish -p macula-craft-share --dry-run --locked
