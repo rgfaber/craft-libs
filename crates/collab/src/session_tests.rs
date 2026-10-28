@@ -439,6 +439,24 @@ fn a_realm_invite_is_refused_on_a_sealed_share() {
 }
 
 #[test]
+fn the_session_says_whether_its_share_is_sealed() {
+    // A window asks the session, so what it shows and what minting does are
+    // the same fact (Neptunus r=1 on macula-craft-collab#26).
+    let mut h = host(MemoryTransport::pair(HOST, "x").0, "doc", true);
+    assert!(!h.collab.sealed(), "no mesh coordinates yet: nothing is sealed");
+
+    let plain = ShareContext { realm: "r".into(), realm_key: "k".into(), seed: "s".into(), profile: "p".into(), group: String::new() };
+    h.collab.set_share_context(plain.clone());
+    assert!(!h.collab.sealed(), "a transport that does not seal names no group");
+
+    h.collab.set_share_context(ShareContext { group: "io.macula/~aa/craft/9f9f9f9f".into(), ..plain });
+    assert!(h.collab.sealed(), "a group prefix is a sealed share");
+
+    // And it is the same answer minting gives: sealed offers no open line.
+    assert!(h.collab.mint_invite(None, None, Role::Editor, 60_000).is_err(), "sealed: by name only");
+}
+
+#[test]
 fn a_joiner_that_has_not_caught_up_never_answers_a_snapshot_request() {
     let mut bus = MemoryTransport::bus(&[HOST, "bbbbbbbb", "cccccccc"]);
     let (ta, tb, tc) = (bus.remove(0), bus.remove(0), bus.remove(0));

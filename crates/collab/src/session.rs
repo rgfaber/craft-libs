@@ -315,6 +315,19 @@ impl CollabSession {
         self.share = Some(share);
     }
 
+    /// Whether this document's share is sealed: its messages travel under a
+    /// group, so an invite has to carry that group's credential.
+    ///
+    /// This is the one answer to the question. It is derived from what the
+    /// session mints with ([`ShareContext::group`], empty when the transport
+    /// does not seal), never from a flag beside it: a second answer is a
+    /// second thing to keep in step, and the two can disagree — a window that
+    /// greys the open line on a share the seam would mint it for, or offers a
+    /// line the seam then refuses.
+    pub fn sealed(&self) -> bool {
+        self.share.as_ref().is_some_and(|share| !share.group.is_empty())
+    }
+
     /// The host shares this document with a realm: members presenting a
     /// live membership of it are admitted with the verifier's role, and a
     /// grant issued on one is capped at the membership's own end.
