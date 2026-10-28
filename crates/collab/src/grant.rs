@@ -211,9 +211,14 @@ pub trait GrantIssuer: Send + Sync {
     /// `group`, minted with the open token for the same `ttl_ms`. Opaque to
     /// the seam: on the mesh it is a UCAN for the distributor's
     /// `group_keys_v1`, and its lifetime never outlives the grant it travels
-    /// with. Empty by default, which is what a transport that does not seal
-    /// returns — a plain build and `MemoryTransport` both.
-    fn group_grant(&self, _doc: &str, _group: &str, _ttl_ms: u64, _now_ms: u64) -> Result<String, String> {
+    /// with. `holder` is the invitee's node id when the invite names one, and
+    /// the credential must be bound to it: the key pull happens before the
+    /// knock, so the distributor has no holder entry to check yet and this
+    /// binding is its whole admission test. `None` on an open invite, whose
+    /// credential is a bearer by design — whoever holds the line holds it.
+    /// Empty by default, which is what a transport that does not seal
+    /// returns: a plain build and `MemoryTransport` both.
+    fn group_grant(&self, _doc: &str, _group: &str, _holder: Option<&str>, _ttl_ms: u64, _now_ms: u64) -> Result<String, String> {
         Ok(String::new())
     }
 }

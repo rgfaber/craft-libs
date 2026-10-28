@@ -6,9 +6,12 @@ name: Gate the craft libraries
 # handoff can cite a run on the exact tip instead of a local terminal.
 
 on:
+  # Every branch, not only main and not only pull requests: a review cites a
+  # run on the branch tip, and a same-repo pull request is already covered by
+  # its branch's push (adding pull_request here would run everything twice).
+  # A fork pull request would need pull_request added back with a filter.
   push:
     branches: ["**"]
-  pull_request:
 
 jobs:
   seam:

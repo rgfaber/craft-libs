@@ -163,10 +163,11 @@ impl Invite {
         if invite.v != INVITE_VERSION {
             return Err(format!("unsupported invite version {}", invite.v));
         }
-        // A group id is hex when there is one; the seam does not mint it and
-        // cannot check it is random, only that the transport named it.
-        if !invite.group.is_empty() && (!invite.group.len().is_multiple_of(2) || !invite.group.chars().all(|c| c.is_ascii_hexdigit())) {
-            return Err("an invite's group is hex characters".into());
+        // A group id is 16 bytes, hex: the transport mints it, and the seam
+        // can check the shape but not the randomness — that duty is the
+        // transport's, and a derived id would put a document id in the clear.
+        if !invite.group.is_empty() && (invite.group.len() != 32 || !invite.group.chars().all(|c| c.is_ascii_hexdigit())) {
+            return Err("an invite's group is 32 hex characters".into());
         }
         Ok(invite)
     }
@@ -323,6 +324,11 @@ mod tests {
         not_hex.group = "the document id".into();
         let line = serde_json::to_string(&not_hex).expect("json");
         assert!(Invite::decode(&line).is_err(), "a group id is hex, not prose");
+
+        let mut short = invite();
+        short.group = "abcd".into();
+        let line = serde_json::to_string(&short).expect("json");
+        assert!(Invite::decode(&line).is_err(), "16 bytes, so 32 hex characters");
 
         // A transport that does not seal names no group and carries no credential.
         let mut plain = invite();

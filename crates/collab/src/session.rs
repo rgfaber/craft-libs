@@ -775,6 +775,14 @@ impl CollabSession {
             (true, None) => return Err("this document is not shared with a realm".into()),
             (false, _) => None,
         };
+        // A sealed share cannot be handed to a realm: a realm invite admits
+        // whoever shows live membership of that realm, which is a reader set
+        // no group key can be scoped to (threat model T14). Refuse rather
+        // than put the group's credential on a line any member can use.
+        if member_realm.is_some() && !share.group.is_empty() {
+            return Err("a realm invite cannot be sealed in this release: share with named people instead".into());
+        }
+        let holder_node = holder.map(|(node, _)| node);
         let token = match holder {
             Some((node, _)) => issuer.issue(&self.doc, node, role, ttl_ms, now)?,
             None => issuer.open_token(&self.doc, role, ttl_ms, now)?,
@@ -790,11 +798,12 @@ impl CollabSession {
             profile: share.profile.clone(),
             seed: share.seed.clone(),
             // The group the joiner pulls a key for before it knocks, and the
-            // credential it presents: both minted with the open token, both
-            // empty on a transport that does not seal.
+            // credential it presents: minted with the open token, and bound to
+            // the invitee when there is one. Both empty on a transport that
+            // does not seal.
             group_grant: match share.group.is_empty() {
                 true => String::new(),
-                false => issuer.group_grant(&self.doc, &share.group, ttl_ms, now)?,
+                false => issuer.group_grant(&self.doc, &share.group, holder_node, ttl_ms, now)?,
             },
             group: share.group.clone(),
             issued_ms: now,

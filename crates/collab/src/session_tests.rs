@@ -112,6 +112,12 @@ impl GrantIssuer for TestIssuer {
         })
     }
 
+    /// Names the holder it was minted for, so a test can see that a
+    /// per-person invite binds the credential and an open one does not.
+    fn group_grant(&self, _doc: &str, group: &str, holder: Option<&str>, _ttl_ms: u64, _now_ms: u64) -> Result<String, String> {
+        Ok(format!("grant-for:{group}:{}", holder.unwrap_or("whoever-holds-the-line")))
+    }
+
     fn revoke(&self, doc: &str, holder: &str, now_ms: u64) -> Result<SignedRevocation, String> {
         Ok(SignedRevocation {
             revocation: Revocation {
@@ -379,6 +385,44 @@ fn a_realm_invite_names_the_shared_realm_and_the_hosts_own() {
     assert_eq!(invite.member_role, Some(Role::Viewer));
     assert!(invite.token.is_none(), "a realm invite carries no token");
     assert_eq!(invite.seed, "s", "the remembered coordinates");
+}
+
+#[test]
+fn a_sealed_invite_binds_the_group_credential_to_the_person_named() {
+    let (bob_id, carol_id) = ("bb".repeat(32), "cc".repeat(32));
+    let mut bus = MemoryTransport::bus(&[HOST, &bob_id, &carol_id]);
+    let (ta, _tb, _tc) = (bus.remove(0), bus.remove(0), bus.remove(0));
+    let h = host(ta, "sealed", true);
+    let share = ShareContext {
+        realm: "cc".repeat(32),
+        realm_key: String::new(),
+        seed: "station.example:4433:dd".into(),
+        profile: "pq_pure".into(),
+        group: "9f".repeat(16),
+    };
+    // The key pull happens before the knock, so the credential is the
+    // distributor's whole test: it names Bob, and nobody else's line carries it.
+    let named = Invite::decode(&h.collab.mint_invite_for(Some(&share), None, &bob_id, "Bob", Role::Editor, 60_000).unwrap()).unwrap();
+    assert_eq!(named.group, "9f".repeat(16));
+    assert!(named.group_grant.contains(&bob_id), "the credential is bound to the invitee: {}", named.group_grant);
+
+    let open = Invite::decode(&h.collab.mint_invite(Some(&share), None, Role::Editor, 60_000).unwrap()).unwrap();
+    assert!(open.group_grant.contains("whoever-holds-the-line"), "an open invite's credential is a bearer: {}", open.group_grant);
+}
+
+#[test]
+fn a_realm_invite_is_refused_on_a_sealed_share() {
+    let mut h = host(MemoryTransport::pair(HOST, "x").0, "doc", true);
+    h.collab.set_member_verifier(Box::new(TestMemberVerifier { accepts: "m".into(), role: Role::Viewer, ends_ms: None }));
+    let sealed = ShareContext { realm: "r".into(), realm_key: "k".into(), seed: "s".into(), profile: "p".into(), group: "9f".repeat(16) };
+    let err = h.collab.mint_realm_invite(Some(&sealed), None, 60_000).unwrap_err();
+    assert!(err.contains("cannot be sealed"), "the limit is named, not silent: {err}");
+
+    // The same document, unsealed, still admits a realm.
+    let plain = ShareContext { group: String::new(), ..sealed };
+    let invite = Invite::decode(&h.collab.mint_realm_invite(Some(&plain), None, 60_000).unwrap()).unwrap();
+    assert_eq!(invite.member_role, Some(Role::Viewer));
+    assert!(invite.group.is_empty() && invite.group_grant.is_empty());
 }
 
 #[test]
