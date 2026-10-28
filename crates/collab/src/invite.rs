@@ -27,6 +27,15 @@ fn default_profile() -> String {
     "pq_hybrid".into()
 }
 
+/// Whether `s` is a topic prefix this seam will carry: `realm/org/app/domain`,
+/// at least three segments, each non-empty and free of whitespace, under 256
+/// characters. The transport owns what goes in each slot; this only keeps a
+/// line of prose from arriving where a prefix belongs.
+fn is_topic_prefix(s: &str) -> bool {
+    let segments: Vec<&str> = s.split('/').collect();
+    s.len() <= 256 && segments.len() >= 3 && segments.iter().all(|seg| !seg.is_empty() && !seg.contains(char::is_whitespace) && seg.is_ascii())
+}
+
 /// A host's invitation to one document.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Invite {
@@ -50,11 +59,14 @@ pub struct Invite {
     pub profile: String,
     /// One seed station, `host:port:node_hex`.
     pub seed: String,
-    /// The sealed group this session's document travels under: a random id
-    /// minted by the transport when the host starts sharing, **never derived
-    /// from the document** (a derived one would put the document's permanent
-    /// id in the clear on every topic). Empty when the transport does not
-    /// seal — a plain build, and `MemoryTransport`.
+    /// The sealed group this session's document travels under, as its whole
+    /// topic prefix (`<realm>/<org>/<app>/<domain>`): the transport mints it
+    /// when the host starts sharing, **never derived from the document**. The
+    /// whole prefix travels rather than a bare id because its first segment is
+    /// the realm's *name* while the envelope's `realm` is a hex id, and
+    /// splitting a prefix across two fields is how they drift apart. Empty
+    /// when the transport does not seal — a plain build, and
+    /// `MemoryTransport`.
     #[serde(default)]
     pub group: String,
     /// What the joiner presents to pull that group's key. Opaque to the
@@ -163,11 +175,13 @@ impl Invite {
         if invite.v != INVITE_VERSION {
             return Err(format!("unsupported invite version {}", invite.v));
         }
-        // A group id is 16 bytes, hex: the transport mints it, and the seam
-        // can check the shape but not the randomness — that duty is the
-        // transport's, and a derived id would put a document id in the clear.
-        if !invite.group.is_empty() && (invite.group.len() != 32 || !invite.group.chars().all(|c| c.is_ascii_hexdigit())) {
-            return Err("an invite's group is 32 hex characters".into());
+        // The group is a topic prefix (`<realm>/<org>/<app>/<domain>`). The
+        // seam checks the shape and nothing else: the realm's name, the org
+        // and the randomness of what the transport puts in those slots are the
+        // transport's business, and a prefix derived from a document id would
+        // put that id in the clear on every topic.
+        if !invite.group.is_empty() && !is_topic_prefix(&invite.group) {
+            return Err("an invite's group is a topic prefix".into());
         }
         Ok(invite)
     }
@@ -194,7 +208,7 @@ mod tests {
             realm_key: "ee".repeat(32),
             profile: "pq_hybrid".into(),
             seed: "station.example:4433:dd".repeat(32),
-            group: "ff".repeat(16),
+            group: "io.macula/~aa/craft/9f9f9f9f".into(),
             group_grant: "ucan-for-the-group".into(),
             issued_ms: 100,
             expires_ms: 200,
@@ -304,31 +318,37 @@ mod tests {
         assert!(Invite::decode(&line).is_err(), "v4 names no sealed group; a host must re-mint");
     }
 
-    /// The joiner pulls the group's key before it knocks, so the group and
-    /// the credential that pulls its key travel in the signed envelope.
+    /// The joiner pulls the group's key before it knocks, so the group's whole
+    /// prefix and the credential that pulls its key travel in the signed
+    /// envelope.
     #[test]
-    fn the_group_and_its_grant_are_signed_and_hex_checked() {
+    fn the_group_and_its_grant_are_signed_and_prefix_checked() {
         let base = invite().signed_bytes().expect("bytes");
         let mut tampered = invite();
-        tampered.group = "ee".repeat(16);
+        tampered.group = "io.macula/~bb/craft/9f9f9f9f".into();
         assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the group is covered");
         let mut tampered = invite();
         tampered.group_grant = "another-ucan".into();
         assert_ne!(base, tampered.signed_bytes().expect("bytes"), "the credential is covered");
 
         let back = Invite::decode(&invite().encode().expect("encode")).expect("decode");
-        assert_eq!(back.group, "ff".repeat(16));
+        assert_eq!(back.group, "io.macula/~aa/craft/9f9f9f9f");
         assert_eq!(back.group_grant, "ucan-for-the-group");
 
-        let mut not_hex = invite();
-        not_hex.group = "the document id".into();
-        let line = serde_json::to_string(&not_hex).expect("json");
-        assert!(Invite::decode(&line).is_err(), "a group id is hex, not prose");
+        let mut prose = invite();
+        prose.group = "the document id".into();
+        let line = serde_json::to_string(&prose).expect("json");
+        assert!(Invite::decode(&line).is_err(), "a group is a prefix, not prose");
 
-        let mut short = invite();
-        short.group = "abcd".into();
-        let line = serde_json::to_string(&short).expect("json");
-        assert!(Invite::decode(&line).is_err(), "16 bytes, so 32 hex characters");
+        let mut two_segments = invite();
+        two_segments.group = "io.macula/craft".into();
+        let line = serde_json::to_string(&two_segments).expect("json");
+        assert!(Invite::decode(&line).is_err(), "realm, org and app at least");
+
+        let mut empty_segment = invite();
+        empty_segment.group = "io.macula//craft/9f".into();
+        let line = serde_json::to_string(&empty_segment).expect("json");
+        assert!(Invite::decode(&line).is_err(), "no empty segment");
 
         // A transport that does not seal names no group and carries no credential.
         let mut plain = invite();

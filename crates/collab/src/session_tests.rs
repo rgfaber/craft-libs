@@ -398,23 +398,36 @@ fn a_sealed_invite_binds_the_group_credential_to_the_person_named() {
         realm_key: String::new(),
         seed: "station.example:4433:dd".into(),
         profile: "pq_pure".into(),
-        group: "9f".repeat(16),
+        group: "io.macula/~aa/craft/9f9f9f9f".into(),
     };
     // The key pull happens before the knock, so the credential is the
     // distributor's whole test: it names Bob, and nobody else's line carries it.
     let named = Invite::decode(&h.collab.mint_invite_for(Some(&share), None, &bob_id, "Bob", Role::Editor, 60_000).unwrap()).unwrap();
-    assert_eq!(named.group, "9f".repeat(16));
+    assert_eq!(named.group, "io.macula/~aa/craft/9f9f9f9f");
     assert!(named.group_grant.contains(&bob_id), "the credential is bound to the invitee: {}", named.group_grant);
 
-    let open = Invite::decode(&h.collab.mint_invite(Some(&share), None, Role::Editor, 60_000).unwrap()).unwrap();
-    assert!(open.group_grant.contains("whoever-holds-the-line"), "an open invite's credential is a bearer: {}", open.group_grant);
+    // An open invite cannot be sealed — there is no node to bind the
+    // credential to, so it is refused rather than minted as a bearer.
+    let err = h.collab.mint_invite(Some(&share), None, Role::Editor, 60_000).unwrap_err();
+    assert!(err.contains("by name"), "the limit is named, not silent: {err}");
+
+    // The same document, unsealed, still mints an open link.
+    let plain = ShareContext { group: String::new(), ..share };
+    let open = Invite::decode(&h.collab.mint_invite(Some(&plain), None, Role::Editor, 60_000).unwrap()).unwrap();
+    assert!(open.group.is_empty() && open.group_grant.is_empty());
 }
 
 #[test]
 fn a_realm_invite_is_refused_on_a_sealed_share() {
     let mut h = host(MemoryTransport::pair(HOST, "x").0, "doc", true);
     h.collab.set_member_verifier(Box::new(TestMemberVerifier { accepts: "m".into(), role: Role::Viewer, ends_ms: None }));
-    let sealed = ShareContext { realm: "r".into(), realm_key: "k".into(), seed: "s".into(), profile: "p".into(), group: "9f".repeat(16) };
+    let sealed = ShareContext {
+        realm: "r".into(),
+        realm_key: "k".into(),
+        seed: "s".into(),
+        profile: "p".into(),
+        group: "io.macula/~aa/craft/9f9f9f9f".into(),
+    };
     let err = h.collab.mint_realm_invite(Some(&sealed), None, 60_000).unwrap_err();
     assert!(err.contains("cannot be sealed"), "the limit is named, not silent: {err}");
 

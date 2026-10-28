@@ -99,10 +99,11 @@ pub struct ShareContext {
     pub realm_key: String,
     pub seed: String,
     pub profile: String,
-    /// The sealed group this session's document travels under: a random id
-    /// the transport mints when the host starts sharing, never derived from
-    /// the document. Empty when the transport does not seal (a plain build,
-    /// and `MemoryTransport`), and then the invite carries no group either.
+    /// The sealed group this session's document travels under, as its whole
+    /// topic prefix (`<realm>/<org>/<app>/<domain>`): the transport mints it
+    /// when the host starts sharing, never derived from the document. Empty
+    /// when the transport does not seal (a plain build, and `MemoryTransport`),
+    /// and then the invite carries no group either.
     pub group: String,
 }
 
@@ -781,6 +782,13 @@ impl CollabSession {
         // than put the group's credential on a line any member can use.
         if member_realm.is_some() && !share.group.is_empty() {
             return Err("a realm invite cannot be sealed in this release: share with named people instead".into());
+        }
+        // An open invite has no node to bind a group credential to, and the
+        // mesh checks a UCAN's audience against the caller, so an unsealed
+        // line would either hand the key to whoever copies it or pull
+        // nothing at all. A sealed share is shared with named people.
+        if holder.is_none() && !share.group.is_empty() {
+            return Err("an open invite cannot be sealed: invite people by name".into());
         }
         let holder_node = holder.map(|(node, _)| node);
         let token = match holder {
