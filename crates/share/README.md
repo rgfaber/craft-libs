@@ -1,6 +1,6 @@
 # macula-craft-share
 
-The Share and Sign in windows for Craft apps, in [egui](https://crates.io/crates/egui) 0.36, over
+The Share and Sign in windows for Craft apps, in [egui](https://crates.io/crates/egui) 0.37, over
 [macula-craft-seam](https://crates.io/crates/macula-craft-seam)'s shared document session.
 
 - **Share**: the host mints and copies invite lines, approves the people waiting at the door, revokes
@@ -24,7 +24,7 @@ craft_share::login::show(ctx, &mut login_state, &mut host);
 The library name is `macula_craft_share`; apps that call it `craft_share` rename the dependency:
 
 ```toml
-craft-share = { package = "macula-craft-share", version = "0.6" }
+craft-share = { package = "macula-craft-share", version = "0.7" }
 ```
 
 Licensed under MIT or Apache-2.0, at your option.
