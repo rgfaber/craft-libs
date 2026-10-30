@@ -490,6 +490,13 @@ impl CollabSession {
         self.order.forget_stalled();
     }
 
+    /// How many publications this session's transport knows did not leave the
+    /// machine. A rise means an edit of this person's was never sent, which is
+    /// what an app tells them; see [`Transport::refused_publications`].
+    pub fn refused_publications(&self) -> u64 {
+        self.transport.refused_publications()
+    }
+
     /// Counts a peer message the app refused (a command it would never
     /// send).
     pub fn note_refused(&mut self) {
@@ -909,6 +916,10 @@ impl CollabSession {
             "realmShare": self.member_verifier.is_some(),
             "pending": self.pending.iter().map(|(node, p)| json!({"node": short(node), "name": p.name})).collect::<Vec<_>>(),
             "contacts": self.contacts.len(),
+            // Publications that did not leave this machine: an app shows the
+            // rise so a person is told, instead of the edit vanishing without
+            // a word (macula-craft-collab#39).
+            "unsent": self.transport.refused_publications(),
             // What the order buffer is holding: a share that is missing
             // messages says so here instead of looking healthy
             // (rgfaber/craft-libs#2).

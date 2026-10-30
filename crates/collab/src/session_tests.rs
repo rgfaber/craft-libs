@@ -839,3 +839,43 @@ fn one_lost_message_is_recovered_by_a_state_exchange_and_the_author_is_heard_aga
     bob.tick();
     assert_eq!(bob.replayed, vec![("aaaaaaaa".to_string(), "later".to_string())], "a later command arrives");
 }
+
+/// A transport that reports publications it could not send.
+struct Refusing {
+    inner: MemoryTransport,
+    refused: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl Transport for Refusing {
+    fn author(&self) -> String {
+        self.inner.author()
+    }
+
+    fn send(&mut self, msg: Message) -> Result<(), String> {
+        self.inner.send(msg)
+    }
+
+    fn poll(&mut self) -> Vec<Message> {
+        self.inner.poll()
+    }
+
+    fn refused_publications(&self) -> u64 {
+        self.refused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// An edit that did not leave the machine is visible to the app, so a person
+/// can be told instead of watching it vanish (macula-craft-collab#39).
+#[test]
+fn a_publication_that_did_not_leave_is_reported_to_the_app() {
+    let (ta, _tb) = pair();
+    let refused = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let h = host_on(Box::new(Refusing { inner: ta, refused: Arc::clone(&refused) }), "abc", true);
+    assert_eq!(h.stats()["unsent"], 0, "nothing has failed yet");
+    assert_eq!(h.collab.refused_publications(), 0);
+
+    refused.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    assert_eq!(h.stats()["unsent"], 1, "the app sees the rise in the frame it happened");
+    assert_eq!(h.collab.refused_publications(), 1, "and can read it without the stats document");
+}

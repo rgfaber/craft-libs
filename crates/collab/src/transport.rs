@@ -22,4 +22,16 @@ pub trait Transport: Send {
     fn membership(&self) -> Option<String> {
         None
     }
+    /// How many publications this transport knows did not leave the machine:
+    /// the ones it was asked to send and could not, whether because the share
+    /// could not seal them or because no link would take them.
+    ///
+    /// What it counts is *unsent*, not *lost*: a message a lower layer
+    /// accepted and then dropped is not in this number. An app shows the rise
+    /// so a person is told their edit did not go out instead of watching it
+    /// vanish (macula-craft-collab#39). `0` for a transport with no such
+    /// notion, which is every in-memory one.
+    fn refused_publications(&self) -> u64 {
+        0
+    }
 }
