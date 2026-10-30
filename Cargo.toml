@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-# 0.7.0 is the share crate's version; the seam carries its own (0.6.1) in its
+# 0.7.0 is the share crate's version; the seam carries its own (0.7.0) in its
 # manifest, because the two crates release on their own tags.
 version = "0.7.0"
 edition = "2024"
@@ -14,14 +14,13 @@ repository = "https://github.com/echelon/craft-libs"
 [workspace.dependencies]
 # internal: add each crate here as `craft-<name> = { path = "crates/<name>" }`
 # the collaboration seam, published as macula-craft-seam; code keeps `craft_collab`
-# Pinned to 0.6.1: a share built here is built against invite v5, which is what
-# carries the sealed group's prefix and the credential that pulls its key, and
-# against `CollabSession::sealed()` (0.6.1), which is how the Share window knows
-# to grey the open line rather than offer one the seam refuses. `0.6.1` is a
-# caret range (>=0.6.1, <0.7). It moves to 0.7.0 in the commit that publishes
-# seam 0.7.0: the share job dry-run publishes, so a dependency that is not on
-# the index yet fails that gate.
-craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.6.1" }
+# Pinned to 0.7.0: a share built here is built against invite v5, against
+# `CollabSession::sealed()` (0.6.1), and against the bounded, recoverable order
+# stall and the `unsent` count (0.7.0). `0.7.0` is a caret range
+# (>=0.7.0, <0.8). The seam tag publishes first: the share job dry-run
+# publishes, and a dependency that is not on the index yet fails that gate, so
+# this commit's share job is red until `macula-craft-seam-v0.7.0` has run.
+craft-collab = { path = "crates/collab", package = "macula-craft-seam", version = "0.7.0" }
 # the share and sign-in windows, published as macula-craft-share; code keeps `craft_share`
 craft-share = { path = "crates/share", package = "macula-craft-share", version = "0.7" }
 

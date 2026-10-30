@@ -3,7 +3,8 @@ name = "macula-craft-share"
 description = "The Share and Sign in windows for Craft apps (egui): invite, approve, revoke and contacts over macula-craft-seam's shared session, realm sign-in with a QR link."
 # 0.6.0: on a sealed share the open invite line is greyed with the reason; named invites are the path (macula-craft-collab#26).
 # 0.7.0: egui 0.36 -> 0.37, the line the Craft apps draw with, so Wordcraft can embed the windows in one binary (rgfaber/craft-libs#1). No API change; a consumer moves egui with the crate.
-version.workspace = true
+# 0.7.1: builds against macula-craft-seam 0.7.0, so the windows show a share whose edits are visibly unsent and whose order buffer recovers a stall (rgfaber/craft-libs#2, macula-craft-collab#39). No API change of its own.
+version = "0.7.1"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/rgfaber/craft-libs"
