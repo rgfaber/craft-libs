@@ -3,9 +3,8 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-# 0.7.0 is the share crate's version; the seam carries its own (0.7.0) in its
-# manifest, because the two crates release on their own tags.
-version = "0.7.0"
+# No version here: each crate carries its own in its manifest, because the two
+# crates release on their own tags (seam 0.7.0, share 0.7.1).
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
