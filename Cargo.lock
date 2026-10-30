@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "macula-craft-seam"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "macula-craft-seam 0.4.0",
  "serde",
@@ -495,7 +495,7 @@ name = "macula-craft-share"
 version = "0.7.0"
 dependencies = [
  "egui",
- "macula-craft-seam 0.6.1",
+ "macula-craft-seam 0.7.0",
  "qrcode",
  "rqrr",
  "serde_json",

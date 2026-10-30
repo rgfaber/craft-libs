@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::grant::{GRANT_VERSION, Grant, GrantVerifier, Revocation, SignedRevocation, mint_nonce};
 use crate::mem::MemoryTransport;
+use crate::message::Message;
+use crate::transport::Transport;
 
 /// The app's side: a document as a string, snapshots as its bytes, and a
 /// log of the commands it replayed.
@@ -170,7 +172,13 @@ fn token(host: &str, role: Role) -> SignedGrant {
 
 /// A host sharing `doc`, with access control and its issuer.
 fn host(transport: MemoryTransport, doc: &str, auto: bool) -> App {
-    let mut collab = CollabSession::host("demo", "Host", Box::new(transport), &[]);
+    host_on(Box::new(transport), doc, auto)
+}
+
+/// The same, on any transport: a test that needs one to lose a message wraps
+/// the in-memory one.
+fn host_on(transport: Box<dyn Transport>, doc: &str, auto: bool) -> App {
+    let mut collab = CollabSession::host("demo", "Host", transport, &[]);
     collab.set_access(table());
     collab.set_issuer(Box::new(TestIssuer { host: HOST.into() }));
     collab.set_auto_approve(auto);
@@ -752,4 +760,82 @@ fn a_revoke_ends_a_grant_issued_after_the_hosts_clock_stepped_back() {
     h.collab.pending.insert("bbbbbbbb".into(), PendingJoin { name: "Bob".into(), role: Role::Editor, ends_ms: None });
     h.collab.approve("bbbbbbbb").unwrap();
     assert_eq!(h.collab.holders(), vec!["bbbbbbbb".to_string()], "the host's later yes is not swallowed");
+}
+
+/// A transport that loses one chosen message on the way, the way a packet is
+/// lost: the sender is told nothing and nothing resends it.
+struct Lossy {
+    inner: MemoryTransport,
+    /// The sequence number to lose, picked once the run knows it.
+    drop_seq: Arc<Mutex<u64>>,
+}
+
+impl Lossy {
+    /// Losing nothing until the shared slot names the sequence to go.
+    fn on(inner: MemoryTransport, drop_seq: Arc<Mutex<u64>>) -> Lossy {
+        Lossy { inner, drop_seq }
+    }
+}
+
+impl Transport for Lossy {
+    fn author(&self) -> String {
+        self.inner.author()
+    }
+
+    fn send(&mut self, msg: Message) -> Result<(), String> {
+        if self.drop_seq.lock().is_ok_and(|seq| *seq == msg.seq) {
+            return Ok(());
+        }
+        self.inner.send(msg)
+    }
+
+    fn poll(&mut self) -> Vec<Message> {
+        self.inner.poll()
+    }
+
+    fn membership(&self) -> Option<String> {
+        self.inner.membership()
+    }
+}
+
+/// One lost message must cost only itself: the receiver says it is missing
+/// something, recovers by a state exchange, and hears that author again
+/// (rgfaber/craft-libs#2).
+#[test]
+fn one_lost_message_is_recovered_by_a_state_exchange_and_the_author_is_heard_again() {
+    let (ta, tb) = pair();
+    // The host's first publication after admitting Bob is lost on the way;
+    // which sequence number that is is only known once it is admitted.
+    let loss: Arc<Mutex<u64>> = Arc::new(Mutex::new(u64::MAX));
+    let mut h = host_on(Box::new(Lossy::on(ta, Arc::clone(&loss))), "abc", true);
+    let mut bob = joiner(tb, "Bob", Some(token(HOST, Role::Editor)), None);
+    admit(&mut h, &mut bob);
+    assert_eq!(bob.doc, "abc", "admitted and caught up");
+    if let Ok(mut slot) = loss.lock() {
+        *slot = h.collab.seq + 1;
+    }
+
+    h.collab.send_command("lost".into(), b"{}".to_vec(), None);
+    h.collab.send_command("held".into(), b"{}".to_vec(), None);
+    bob.tick();
+    assert!(bob.replayed.is_empty(), "the command behind the hole is not applied");
+    assert_eq!(bob.stats()["order"]["held"], 1, "the session says what it is holding");
+    assert_eq!(bob.stats()["order"]["gaps"], 1, "and that one author is behind");
+    assert!(bob.stats()["order"]["stalled"].is_number(), "the hole has only just opened");
+
+    // The deadline passes without the missing message ever arriving.
+    bob.collab.order.backdate_stall(60_000);
+    bob.tick();
+    h.tick();
+    bob.tick();
+
+    assert_eq!(bob.stats()["order"]["gaps"], 0, "the stuck stream is given up");
+    assert_eq!(bob.stats()["order"]["held"], 0);
+    assert_eq!(bob.stats()["order"]["stalled"], Value::Null, "and the share says it is not stuck");
+    assert_eq!(bob.doc, "abc", "recovered by the state exchange rather than stuck");
+
+    // The author is heard again, which the stall used to prevent for good.
+    h.collab.send_command("later".into(), b"{}".to_vec(), None);
+    bob.tick();
+    assert_eq!(bob.replayed, vec![("aaaaaaaa".to_string(), "later".to_string())], "a later command arrives");
 }

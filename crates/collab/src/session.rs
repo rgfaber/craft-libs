@@ -484,6 +484,10 @@ impl CollabSession {
         let _ = self.texts.apply_doc_update(crdt);
         self.awaiting_snapshot = false;
         self.has_snapshot = true;
+        // The peer's history is now this session's: whatever a gap was
+        // holding is in it, so the streams that were stuck restart from the
+        // next message heard rather than being stuck for good.
+        self.order.forget_stalled();
     }
 
     /// Counts a peer message the app refused (a command it would never
@@ -509,6 +513,19 @@ impl CollabSession {
             }
         }
         let now = now_ms();
+        // A lost message must not stop its author for the rest of the
+        // session: past the deadline the document is recovered by asking for
+        // a state exchange, and when no peer answers, the stuck streams are
+        // given up so their authors can be heard again
+        // (rgfaber/craft-libs#2).
+        if self.order.stalled_past_deadline(now) {
+            if !self.awaiting_snapshot {
+                self.awaiting_snapshot = true;
+                self.snapshot_attempts = 0;
+            } else if self.snapshot_attempts >= MAX_ATTEMPTS {
+                self.order.forget_stalled();
+            }
+        }
         if self.awaiting_grant
             && self.grant_attempts < MAX_ATTEMPTS
             && (self.grant_attempts == 0 || now.saturating_sub(self.last_grant_ms) >= RETRY_MS)
@@ -534,10 +551,21 @@ impl CollabSession {
 
     /// The messages for this document from other authors, in per-author
     /// sequence.
+    ///
+    /// Only what must be ordered is ordered. The door, the grants and the
+    /// snapshot traffic go straight through: a state exchange is what
+    /// recovers a gap, so it must never be queued behind the gap it is
+    /// recovering.
     fn poll(&mut self) -> Vec<Message> {
         let mut out = Vec::new();
         for msg in self.transport.poll() {
-            if msg.doc == self.doc && msg.author != self.author {
+            if msg.doc != self.doc || msg.author == self.author {
+                continue;
+            }
+            if bypasses_order(&msg.kind) {
+                self.order.observe(&msg.author, msg.epoch, msg.seq);
+                out.push(msg);
+            } else {
                 out.extend(self.order.push(msg));
             }
         }
@@ -881,8 +909,26 @@ impl CollabSession {
             "realmShare": self.member_verifier.is_some(),
             "pending": self.pending.iter().map(|(node, p)| json!({"node": short(node), "name": p.name})).collect::<Vec<_>>(),
             "contacts": self.contacts.len(),
+            // What the order buffer is holding: a share that is missing
+            // messages says so here instead of looking healthy
+            // (rgfaber/craft-libs#2).
+            "order": {
+                "held": self.order.held(),
+                "gaps": self.order.gaps(),
+                "stalled": self.order.stalled_for(now_ms()),
+            },
         })
     }
+}
+
+/// Whether a message skips the author's sequence.
+///
+/// The snapshot exchange is the one thing that must get through a gap: a
+/// state exchange queued behind the hole it is meant to recover is no
+/// recovery at all. Everything else, including the door and the grants,
+/// keeps its place in the author's stream.
+fn bypasses_order(kind: &Kind) -> bool {
+    matches!(kind, Kind::Snapshot { .. } | Kind::SnapshotRequest {})
 }
 
 /// An author id shortened for people: its first eight characters.

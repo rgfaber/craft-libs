@@ -8,7 +8,8 @@ description = "A collaboration seam for document apps: signed ops, grants and in
 # 0.5.5: after the host's clock stepped back, its revoke is signed later than the grant it ends, and a re-grant later than that revoke.
 # 0.6.0: invite v5 — the invite carries the share's whole group prefix and the credential that pulls its key, a sealed invite binds the group credential to the person named, and a realm invite or an open invite is refused on a sealed share (macula-craft-collab#26). `is_topic_prefix` holds a group prefix to exactly four segments.
 # 0.6.1: `CollabSession::sealed()` — whether the share is sealed is asked of the session that mints invites, from its own ShareContext, not of a flag on the app's host trait, so the windows and the mint cannot disagree.
-version = "0.6.1"
+# 0.7.0: one lost message costs only itself (rgfaber/craft-libs#2). The order buffer reports what it holds and for how long, the session recovers a stall past STALL_DEADLINE_MS by a state exchange, gives up the stuck streams when no peer answers, and the snapshot exchange no longer queues behind the gap it recovers. stats() gains `order: {held, gaps, stalled}`.
+version = "0.7.0"
 edition.workspace = true
 license.workspace = true
 repository = "https://github.com/rgfaber/craft-libs"
