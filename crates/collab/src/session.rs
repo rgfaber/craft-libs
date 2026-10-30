@@ -148,6 +148,10 @@ pub struct CollabSession {
     last_cursor: Option<String>,
     /// This session asked for the document snapshot and is waiting for it.
     awaiting_snapshot: bool,
+    /// This session set `awaiting_snapshot` itself, to recover a stalled
+    /// stream, rather than waiting for the document it has never had. Giving
+    /// up may only clear what recovery asked for, never a join in progress.
+    recovery_asked: bool,
     snapshot_attempts: u32,
     last_snapshot_ms: u64,
     /// The host's signing side, when this session is the host.
@@ -204,6 +208,7 @@ impl CollabSession {
             epoch: now_ms().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(std::process::id()).wrapping_mul(0xBF58_476D_1CE4_E5B9),
             last_cursor: None,
             awaiting_snapshot: false,
+            recovery_asked: false,
             snapshot_attempts: 0,
             last_snapshot_ms: 0,
             issuer: None,
@@ -483,6 +488,7 @@ impl CollabSession {
     pub fn snapshot_loaded(&mut self, crdt: &[u8]) {
         let _ = self.texts.apply_doc_update(crdt);
         self.awaiting_snapshot = false;
+        self.recovery_asked = false;
         self.has_snapshot = true;
         // The peer's history is now this session's: whatever a gap was
         // holding is in it, so the streams that were stuck restart from the
@@ -526,11 +532,20 @@ impl CollabSession {
         // given up so their authors can be heard again
         // (rgfaber/craft-libs#2).
         if self.order.stalled_past_deadline(now) {
-            if !self.awaiting_snapshot {
+            if !self.recovery_asked {
+                self.recovery_asked = true;
                 self.awaiting_snapshot = true;
                 self.snapshot_attempts = 0;
             } else if self.snapshot_attempts >= MAX_ATTEMPTS {
+                // Nobody answered. Give the stuck streams up so their authors
+                // are heard again, and stop asking: leaving the session
+                // awaiting a snapshot for ever would report it as not joined,
+                // hand it other peers' snapshots, and never ask again for the
+                // next stall (Uranus r1, R2).
                 self.order.forget_stalled();
+                self.recovery_asked = false;
+                self.awaiting_snapshot = false;
+                self.snapshot_attempts = 0;
             }
         }
         if self.awaiting_grant
@@ -570,7 +585,7 @@ impl CollabSession {
                 continue;
             }
             if bypasses_order(&msg.kind) {
-                self.order.observe(&msg.author, msg.epoch, msg.seq);
+                out.extend(self.order.observe(&msg.author, msg.epoch, msg.seq));
                 out.push(msg);
             } else {
                 out.extend(self.order.push(msg));
@@ -905,7 +920,11 @@ impl CollabSession {
             "doc": self.doc,
             "author": short(&self.author),
             "authorId": self.author,
-            "joined": !self.awaiting_snapshot,
+            // Whether this session holds the document. Asked of what it has,
+            // not of what it is waiting for: a recovery in progress is still
+            // a joined session, and it must not flicker to false while it
+            // catches up (Uranus r1, observation).
+            "joined": self.has_snapshot,
             "seq": self.seq,
             "peers": peers,
             "latency": latency,

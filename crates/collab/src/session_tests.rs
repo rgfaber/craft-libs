@@ -840,6 +840,54 @@ fn one_lost_message_is_recovered_by_a_state_exchange_and_the_author_is_heard_aga
     assert_eq!(bob.replayed, vec![("aaaaaaaa".to_string(), "later".to_string())], "a later command arrives");
 }
 
+/// Uranus r1, R2: a stall nobody answers must not leave the session asking for
+/// a document for ever - not joined, taking other peers' snapshots, and never
+/// asking again for the next stall.
+#[test]
+fn a_stall_nobody_answers_ends_and_the_next_one_asks_again() {
+    let (ta, tb) = pair();
+    let loss: Arc<Mutex<u64>> = Arc::new(Mutex::new(u64::MAX));
+    let mut h = host_on(Box::new(Lossy::on(ta, Arc::clone(&loss))), "abc", true);
+    let mut bob = joiner(tb, "Bob", Some(token(HOST, Role::Editor)), None);
+    admit(&mut h, &mut bob);
+
+    // One publication lost, the next held behind it.
+    if let Ok(mut slot) = loss.lock() {
+        *slot = h.collab.seq + 1;
+    }
+    h.collab.send_command("lost".into(), b"{}".to_vec(), None);
+    h.collab.send_command("held".into(), b"{}".to_vec(), None);
+    bob.tick();
+    assert_eq!(bob.stats()["order"]["gaps"], 1, "one author is behind");
+
+    // The deadline passes, Bob asks, and the host never ticks: nobody answers.
+    bob.collab.order.backdate_stall(60_000);
+    bob.tick();
+    assert!(bob.collab.awaiting_snapshot(), "he asked for the document");
+    bob.collab.snapshot_attempts = MAX_ATTEMPTS;
+    bob.tick();
+
+    assert!(!bob.collab.awaiting_snapshot(), "and stopped asking when no peer answered");
+    assert_eq!(bob.stats()["joined"], true, "a session that gave up is still a joined session");
+    assert_eq!(bob.stats()["order"]["gaps"], 0, "the stuck stream was given up");
+
+    // A later stall asks again rather than going straight to giving up.
+    h.collab.send_command("resume".into(), b"{}".to_vec(), None);
+    bob.tick();
+    assert_eq!(bob.replayed.len(), 1, "the stream is heard again");
+    if let Ok(mut slot) = loss.lock() {
+        *slot = h.collab.seq + 1;
+    }
+    h.collab.send_command("lost again".into(), b"{}".to_vec(), None);
+    h.collab.send_command("held again".into(), b"{}".to_vec(), None);
+    bob.tick();
+    assert_eq!(bob.stats()["order"]["gaps"], 1, "a second author is behind");
+    bob.collab.order.backdate_stall(60_000);
+    bob.tick();
+    assert!(bob.collab.awaiting_snapshot(), "the second stall asks for the document too");
+    assert_eq!(bob.collab.snapshot_attempts, 1, "on its first attempt, not by giving up");
+}
+
 /// A transport that reports publications it could not send.
 struct Refusing {
     inner: MemoryTransport,
