@@ -533,9 +533,17 @@ impl CollabSession {
         // (rgfaber/craft-libs#2).
         if self.order.stalled_past_deadline(now) {
             if !self.recovery_asked {
-                self.recovery_asked = true;
-                self.awaiting_snapshot = true;
-                self.snapshot_attempts = 0;
+                // Recovery may take the wait only when it is free. A joiner
+                // still waiting for the document it has never had owns it:
+                // taking it would reset that join's attempts, and giving up
+                // would stop it asking for the document for good (Uranus
+                // r2, R1). While a join waits, a stall is left alone - the
+                // join's own snapshot clears the stuck streams when it lands.
+                if !self.awaiting_snapshot {
+                    self.recovery_asked = true;
+                    self.awaiting_snapshot = true;
+                    self.snapshot_attempts = 0;
+                }
             } else if self.snapshot_attempts >= MAX_ATTEMPTS {
                 // Nobody answered. Give the stuck streams up so their authors
                 // are heard again, and stop asking: leaving the session

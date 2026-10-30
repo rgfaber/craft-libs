@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::grant::{GRANT_VERSION, Grant, GrantVerifier, Revocation, SignedRevocation, mint_nonce};
 use crate::mem::MemoryTransport;
-use crate::message::Message;
+use crate::message::{Kind, Message};
 use crate::transport::Transport;
 
 /// The app's side: a document as a string, snapshots as its bytes, and a
@@ -886,6 +886,38 @@ fn a_stall_nobody_answers_ends_and_the_next_one_asks_again() {
     bob.tick();
     assert!(bob.collab.awaiting_snapshot(), "the second stall asks for the document too");
     assert_eq!(bob.collab.snapshot_attempts, 1, "on its first attempt, not by giving up");
+}
+
+/// Some authored message, for a test that feeds the order buffer directly.
+fn from_author(author: &str, seq: u64) -> Message {
+    Message { doc: "demo".into(), author: author.into(), epoch: 0, seq, sent_at_ms: 0, kind: Kind::CursorMoved { position: None, name: None } }
+}
+
+/// Uranus r2, R1: a joiner waiting for the document it has never had owns
+/// that wait. A stall recovered around it must not reset the join's attempts,
+/// and giving the stall up must not stop the join asking for good.
+#[test]
+fn a_stall_never_ends_a_join_that_is_still_waiting_for_its_document() {
+    let (ta, _tb) = pair();
+    let mut carol = CollabSession::join("demo", "Carol", Box::new(ta));
+    assert!(carol.awaiting_snapshot(), "an open session asks for the document");
+    assert_eq!(carol.stats()["joined"], false, "and does not have it");
+
+    // A peer's traffic arrives meanwhile, and one of its messages is lost.
+    carol.order.push_at(from_author("cccccccc", 5), 0);
+    carol.order.push_at(from_author("cccccccc", 7), 10);
+    assert_eq!(carol.stats()["order"]["gaps"], 1, "a stream is stuck");
+
+    carol.order.backdate_stall(60_000);
+    carol.tick();
+    assert!(carol.awaiting_snapshot(), "the join still owns the wait");
+
+    // The join's attempts run out while the stall is still open.
+    carol.snapshot_attempts = MAX_ATTEMPTS;
+    carol.tick();
+    assert!(carol.awaiting_snapshot(), "giving up a stall does not end the join");
+    assert_eq!(carol.stats()["joined"], false, "the document is still not here");
+    assert_eq!(carol.stats()["order"]["gaps"], 1, "and the stall was left alone, not forgotten");
 }
 
 /// A transport that reports publications it could not send.
