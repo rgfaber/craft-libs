@@ -643,6 +643,11 @@ impl CollabSession {
                     self.awaiting_grant = false;
                     self.awaiting_snapshot = true;
                     self.snapshot_attempts = 0;
+                    // The join owns the wait from here. Without this, a
+                    // recovery that took the wait before the grant landed
+                    // could later give up and clear a join that never got
+                    // its document (Uranus r3, observation).
+                    self.recovery_asked = false;
                 }
                 self.save_grants();
                 None

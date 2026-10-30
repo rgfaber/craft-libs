@@ -893,6 +893,49 @@ fn from_author(author: &str, seq: u64) -> Message {
     Message { doc: "demo".into(), author: author.into(), epoch: 0, seq, sent_at_ms: 0, kind: Kind::CursorMoved { position: None, name: None } }
 }
 
+/// Uranus r3, observation: a joiner waits for its grant before it waits for
+/// the document, so a stall can let recovery take the wait first. When the
+/// grant lands the join owns that wait again, and a later give-up must not
+/// end it.
+#[test]
+fn a_grant_landing_takes_the_wait_back_from_a_recovery() {
+    let bus = MemoryTransport::bus(&["hhhhhhhh", "bbbbbbbb", "cccccccc"]);
+    let mut ends: Vec<MemoryTransport> = bus;
+    let carol_transport = ends.remove(1);
+    let mut host = ends.remove(0);
+    let mut other = ends.remove(0);
+
+    let mut carol = CollabSession::join_requesting("demo", "Carol", Box::new(carol_transport), Some(token(HOST, Role::Editor)), None);
+    assert!(!carol.awaiting_snapshot(), "a joiner waits for its grant before its document");
+
+    // Another author's traffic opens a stall before the grant lands: nothing
+    // admits Carol yet, but with no access control the messages are delivered.
+    host.send(from_author("hhhhhhhh", 1)).unwrap_or_else(|e| panic!("{e}"));
+    other.send(from_author("cccccccc", 5)).unwrap_or_else(|e| panic!("{e}"));
+    other.send(from_author("cccccccc", 7)).unwrap_or_else(|e| panic!("{e}"));
+    carol.tick();
+    assert_eq!(carol.stats()["order"]["gaps"], 1, "one author is behind");
+
+    carol.order.backdate_stall(60_000);
+    carol.tick();
+    assert!(carol.awaiting_snapshot(), "recovery took the wait");
+    assert!(carol.recovery_asked, "and knows it did");
+
+    // The grant lands.
+    let grant = TestIssuer { host: HOST.into() }.issue("demo", "bbbbbbbb", Role::Editor, 60_000, now_ms()).unwrap();
+    let issued = Message { doc: "demo".into(), author: "hhhhhhhh".into(), epoch: 0, seq: 2, sent_at_ms: 0, kind: Kind::GrantIssued { grant } };
+    host.send(issued).unwrap_or_else(|e| panic!("{e}"));
+    carol.tick();
+    assert_eq!(carol.stats()["awaitingGrant"], false, "the grant was taken");
+    assert!(carol.awaiting_snapshot(), "and the join now waits for the document");
+    assert!(!carol.recovery_asked, "recovery has given the wait up");
+
+    // A stall given up now must not end the join.
+    carol.snapshot_attempts = MAX_ATTEMPTS;
+    carol.tick();
+    assert!(carol.awaiting_snapshot(), "the join is not ended by a stall");
+}
+
 /// Uranus r2, R1: a joiner waiting for the document it has never had owns
 /// that wait. A stall recovered around it must not reset the join's attempts,
 /// and giving the stall up must not stop the join asking for good.
